@@ -1,0 +1,8 @@
+fastapi>=0.110
+uvicorn>=0.27
+pandas>=2.0
+
+# Deliberately NOT pinned. Yahoo Finance changes its endpoints often and
+# yfinance ships fixes quickly. If prices stop loading, first try:
+#     pip install -U yfinance
+yfinance

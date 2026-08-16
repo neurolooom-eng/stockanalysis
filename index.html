@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#101219">
+<title>Pivot Desk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#101219; --panel:#171A24; --panel-2:#1E222E; --rule:#2B3040;
+  --paper:#E9E7E2; --muted:#8B90A2; --dim:#5D6376;
+  --up:#39A96B; --down:#DE5B52; --brass:#C9A24C; --brass-dim:#6E5B2C;
+  --sans:'IBM Plex Sans',system-ui,sans-serif;
+  --mono:'IBM Plex Mono',ui-monospace,monospace;
+  --cond:'Barlow Condensed',var(--sans);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--ink);color:var(--paper);font-family:var(--sans);
+  font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased;
+  padding-bottom:env(safe-area-inset-bottom)}
+button{font:inherit;color:inherit;cursor:pointer;border:none;background:none}
+input,select{font:inherit}
+:focus-visible{outline:2px solid var(--brass);outline-offset:2px}
+
+/* ---------- masthead ---------- */
+header{border-bottom:1px solid var(--rule);padding:14px 16px 12px;
+  display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+h1{font-family:var(--cond);font-size:26px;font-weight:700;letter-spacing:.06em;
+  text-transform:uppercase}
+h1 .tick{color:var(--brass)}
+.tagline{font-family:var(--mono);font-size:11px;color:var(--dim);letter-spacing:.04em}
+.clock{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--muted)}
+
+/* ---------- profile rail ---------- */
+.rail{display:flex;gap:8px;overflow-x:auto;padding:12px 16px;
+  border-bottom:1px solid var(--rule);scrollbar-width:none}
+.rail::-webkit-scrollbar{display:none}
+.chip{white-space:nowrap;padding:7px 14px;border:1px solid var(--rule);
+  border-radius:2px;font-family:var(--cond);font-size:15px;font-weight:600;
+  letter-spacing:.05em;text-transform:uppercase;color:var(--muted);
+  transition:.15s}
+.chip:hover{border-color:var(--dim);color:var(--paper)}
+.chip[aria-pressed="true"]{background:var(--paper);color:var(--ink);border-color:var(--paper)}
+.chip .n{font-family:var(--mono);font-size:11px;opacity:.6;margin-left:6px}
+.chip.add{color:var(--brass);border-style:dashed;border-color:var(--brass-dim)}
+
+/* ---------- layout ---------- */
+main{padding:16px;max-width:1100px;margin:0 auto}
+.bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.eyebrow{font-family:var(--mono);font-size:11px;color:var(--dim);
+  letter-spacing:.12em;text-transform:uppercase}
+.tally{display:flex;gap:14px;font-family:var(--mono);font-size:12px}
+.tally b{font-weight:600}
+.tally .b{color:var(--up)} .tally .s{color:var(--down)} .tally .h{color:var(--muted)}
+.btn{padding:8px 16px;border:1px solid var(--rule);border-radius:2px;
+  font-size:13px;font-weight:500;transition:.15s}
+.btn:hover{border-color:var(--dim);background:var(--panel)}
+.btn.solid{background:var(--brass);color:#171308;border-color:var(--brass);font-weight:600}
+.btn.solid:hover{background:#DCB35C}
+.btn.ghost{color:var(--muted)}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.spacer{margin-left:auto}
+
+/* ---------- editor ---------- */
+.editor{background:var(--panel);border:1px solid var(--rule);padding:16px;
+  margin-bottom:18px}
+.field{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+.field input,.field select{background:var(--ink);border:1px solid var(--rule);
+  color:var(--paper);padding:9px 12px;border-radius:2px;font-size:14px}
+.field input{flex:1;min-width:150px;font-family:var(--mono);text-transform:uppercase}
+.field input::placeholder{text-transform:none;color:var(--dim);font-family:var(--sans)}
+.holding{display:flex;flex-wrap:wrap;gap:6px}
+.held{display:flex;align-items:center;gap:7px;background:var(--panel-2);
+  border:1px solid var(--rule);padding:5px 8px 5px 11px;border-radius:2px;
+  font-family:var(--mono);font-size:12px}
+.held small{color:var(--dim);font-size:10px}
+.held button{color:var(--dim);font-size:15px;line-height:1;padding:0 2px}
+.held button:hover{color:var(--down)}
+.sugg{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.sugg button{font-family:var(--mono);font-size:11px;color:var(--muted);
+  border:1px solid var(--rule);padding:4px 8px;border-radius:2px}
+.sugg button:hover{color:var(--brass);border-color:var(--brass-dim)}
+
+/* ---------- cards ---------- */
+.grid{display:grid;gap:14px;grid-template-columns:1fr}
+@media(min-width:720px){.grid{grid-template-columns:1fr 1fr}}
+@media(min-width:1020px){.grid{grid-template-columns:1fr 1fr 1fr}}
+.card{background:var(--panel);border:1px solid var(--rule);
+  border-top:2px solid var(--rule);padding:14px}
+.card.buy{border-top-color:var(--up)} .card.sell{border-top-color:var(--down)}
+.card.hold{border-top-color:var(--dim)}
+.card.err{border-top-color:var(--brass-dim);opacity:.75}
+.head{display:flex;align-items:flex-start;gap:10px}
+.sym{font-family:var(--cond);font-size:23px;font-weight:700;letter-spacing:.04em;
+  line-height:1.1}
+.sym small{display:block;font-family:var(--mono);font-size:9px;font-weight:400;
+  color:var(--dim);letter-spacing:.14em;margin-top:1px}
+.px{margin-left:auto;text-align:right;font-family:var(--mono)}
+.px .v{font-size:19px;font-weight:600}
+.px .d{font-size:11px}
+.up{color:var(--up)} .down{color:var(--down)}
+.verdict{display:flex;align-items:center;gap:8px;margin:12px 0 4px}
+.verdict .tag{font-family:var(--cond);font-size:15px;font-weight:700;
+  letter-spacing:.14em;padding:3px 9px}
+.buy .tag{background:var(--up);color:#06170E}
+.sell .tag{background:var(--down);color:#1D0806}
+.hold .tag{background:var(--panel-2);color:var(--muted);border:1px solid var(--rule)}
+.meter{flex:1;height:3px;background:var(--panel-2);position:relative}
+.meter i{position:absolute;inset:0 auto 0 50%;background:var(--dim);
+  transform-origin:left;display:block}
+.buy .meter i{background:var(--up)} .sell .meter i{background:var(--down)}
+.score{font-family:var(--mono);font-size:11px;color:var(--muted)}
+
+/* ---------- the pivot ladder (signature) ---------- */
+.ladder{position:relative;height:168px;margin:16px 0 6px;
+  border-left:1px solid var(--rule);padding-left:0}
+.rung{position:absolute;left:0;right:0;height:1px;background:var(--rule)}
+.rung.key{background:var(--brass-dim)}
+.rung.mid{background:var(--brass);opacity:.55}
+.rung b{position:absolute;left:6px;top:-7px;font-family:var(--mono);font-size:9px;
+  font-weight:500;color:var(--dim);letter-spacing:.1em}
+.rung.key b,.rung.mid b{color:var(--brass)}
+.rung i{position:absolute;right:0;top:-7px;font-family:var(--mono);font-size:9px;
+  font-style:normal;color:var(--dim)}
+.now{position:absolute;left:0;right:0;height:2px;background:var(--paper);
+  box-shadow:0 0 14px rgba(233,231,226,.35);z-index:2}
+.buy .now{background:var(--up);box-shadow:0 0 14px rgba(57,169,107,.5)}
+.sell .now{background:var(--down);box-shadow:0 0 14px rgba(222,91,82,.5)}
+.now span{position:absolute;right:0;top:-8px;font-family:var(--mono);font-size:10px;
+  font-weight:600;background:var(--panel);padding:1px 4px}
+.buy .now span{color:var(--up)} .sell .now span{color:var(--down)}
+.vline{position:absolute;left:0;right:0;height:0;border-top:1px dashed #4A5570;z-index:1}
+.vline b{position:absolute;left:6px;top:-7px;font-family:var(--mono);font-size:9px;
+  color:#7A87A8;letter-spacing:.1em}
+
+/* ---------- reasons ---------- */
+.why{border-top:1px solid var(--rule);margin-top:12px;padding-top:10px;
+  display:flex;flex-direction:column;gap:5px}
+.why div{display:flex;gap:8px;align-items:baseline;font-size:12px;color:var(--muted)}
+.why em{font-family:var(--mono);font-style:normal;font-size:10px;width:34px;
+  flex:none;text-align:right}
+.why .p em{color:var(--up)} .why .n em{color:var(--down)} .why .z em{color:var(--dim)}
+.stats{display:flex;gap:14px;margin-top:10px;font-family:var(--mono);font-size:11px;
+  color:var(--dim);flex-wrap:wrap}
+.stats b{color:var(--muted);font-weight:500}
+.foot{margin-top:9px;font-family:var(--mono);font-size:10px;color:var(--dim)}
+
+/* ---------- states ---------- */
+.empty{border:1px dashed var(--rule);padding:38px 20px;text-align:center;
+  color:var(--muted)}
+.empty p{margin-bottom:14px}
+.note{font-family:var(--mono);font-size:11px;color:var(--dim);
+  border-top:1px solid var(--rule);margin-top:26px;padding-top:14px;line-height:1.7}
+.toast{position:fixed;left:16px;right:16px;bottom:16px;background:var(--panel-2);
+  border:1px solid var(--brass-dim);color:var(--paper);padding:11px 14px;
+  font-size:13px;z-index:9;border-radius:2px}
+.skel{animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Pivot<span class="tick">·</span>Desk</h1>
+  <span class="tagline">CAMARILLA / MA / VWAP &nbsp;—&nbsp; NSE &amp; BSE</span>
+  <span class="clock" id="clock"></span>
+</header>
+
+<nav class="rail" id="rail"></nav>
+
+<main>
+  <div id="body"></div>
+  <p class="note">
+    Data via Yahoo Finance (yfinance), which is delayed — verify any level on your
+    broker terminal before acting on it. Signals are arithmetic on past prices,
+    not advice, and carry no view on what a stock will do next.
+  </p>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+let profiles = [], active = null, stocks = [], limit = 30, starter = [], busy = false;
+
+const money = n => n == null ? '—' : '₹' + n.toLocaleString('en-IN',
+  {minimumFractionDigits:2, maximumFractionDigits:2});
+
+function toast(msg){
+  const t = document.createElement('div');
+  t.className = 'toast'; t.textContent = msg; t.setAttribute('role','status');
+  document.body.appendChild(t); setTimeout(() => t.remove(), 3600);
+}
+
+async function api(path, opts){
+  const r = await fetch(path, {headers:{'Content-Type':'application/json'}, ...opts});
+  const data = await r.json().catch(() => ({}));
+  if(!r.ok) throw new Error(data.detail || 'Request failed');
+  return data;
+}
+
+function tickClock(){
+  $('#clock').textContent = new Date().toLocaleTimeString('en-IN',
+    {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+}
+setInterval(tickClock, 1000); tickClock();
+
+/* ---------------- profiles ---------------- */
+async function loadProfiles(){
+  profiles = (await api('/api/profiles')).profiles;
+  if(!active || !profiles.some(p => p.id === active)) active = profiles[0]?.id ?? null;
+  drawRail();
+  if(active) await loadStocks(); else render();
+}
+
+function drawRail(){
+  const rail = $('#rail');
+  rail.innerHTML = '';
+  profiles.forEach(p => {
+    const b = document.createElement('button');
+    b.className = 'chip';
+    b.setAttribute('aria-pressed', p.id === active);
+    b.innerHTML = `${p.name}<span class="n">${p.stock_count}</span>`;
+    b.onclick = () => { active = p.id; drawRail(); loadStocks(); };
+    rail.appendChild(b);
+  });
+  const add = document.createElement('button');
+  add.className = 'chip add'; add.textContent = '+ Profile';
+  add.onclick = newProfile;
+  rail.appendChild(add);
+}
+
+async function newProfile(){
+  const name = prompt('Name this profile (e.g. Intraday, Swing, Ravi):');
+  if(!name) return;
+  try{
+    const p = await api('/api/profiles', {method:'POST', body:JSON.stringify({name})});
+    active = p.id; await loadProfiles();
+  }catch(e){ toast(e.message); }
+}
+
+async function delProfile(){
+  const p = profiles.find(x => x.id === active);
+  if(!p || !confirm(`Delete "${p.name}" and its watchlist?`)) return;
+  await api('/api/profiles/' + active, {method:'DELETE'});
+  active = null; await loadProfiles();
+}
+
+/* ---------------- watchlist ---------------- */
+async function loadStocks(){
+  const d = await api(`/api/profiles/${active}/stocks`);
+  stocks = d.stocks; limit = d.limit;
+  if(!starter.length) starter = (await api('/api/symbols')).symbols;
+  render();
+}
+
+async function addStock(sym, exch){
+  try{
+    await api(`/api/profiles/${active}/stocks`,
+      {method:'POST', body:JSON.stringify({symbol:sym, exchange:exch})});
+    await loadStocks(); await loadProfiles();
+  }catch(e){ toast(e.message); }
+}
+
+async function dropStock(sym, exch){
+  await api(`/api/profiles/${active}/stocks/${sym}?exchange=${exch}`, {method:'DELETE'});
+  await loadStocks(); await loadProfiles();
+}
+
+/* ---------------- signals ---------------- */
+async function refresh(){
+  if(busy || !stocks.length) return;
+  busy = true; render();
+  try{
+    const d = await api(`/api/profiles/${active}/signals`);
+    render(d);
+  }catch(e){ toast(e.message); render(); }
+  finally{ busy = false; }
+}
+
+/* ---------------- the ladder ---------------- */
+function ladder(s){
+  const p = s.pivots;
+  const lo = Math.min(p.l4, s.price), hi = Math.max(p.h4, s.price);
+  const span = (hi - lo) || 1;
+  const pad = span * 0.06;
+  const y = v => (1 - (v - (lo - pad)) / (span + pad * 2)) * 100;
+  const rows = [['H4','h4','key'],['H3','h3','key'],['H2','h2',''],['H1','h1',''],
+                ['PP','pp','mid'],['L1','l1',''],['L2','l2',''],
+                ['L3','l3','key'],['L4','l4','key']];
+  let html = '<div class="ladder">';
+  rows.forEach(([label, k, cls]) => {
+    html += `<div class="rung ${cls}" style="top:${y(p[k]).toFixed(2)}%">
+      <b>${label}</b><i>${p[k].toFixed(2)}</i></div>`;
+  });
+  if(s.vwap != null && s.vwap > lo - pad && s.vwap < hi + pad)
+    html += `<div class="vline" style="top:${y(s.vwap).toFixed(2)}%"><b>VWAP</b></div>`;
+  html += `<div class="now" style="top:${y(s.price).toFixed(2)}%">
+    <span>${s.price.toFixed(2)}</span></div></div>`;
+  return html;
+}
+
+function card(s){
+  if(s.error) return `<article class="card err"><div class="head">
+      <div class="sym">${s.symbol}<small>${s.exchange}</small></div></div>
+      <p class="foot">Could not load: ${s.error}</p></article>`;
+  const dir = s.change_pct >= 0 ? 'up' : 'down';
+  const cls = s.signal.toLowerCase();
+  const width = Math.abs(s.score) / 3 * 50;
+  const side = s.score >= 0 ? `left:50%;width:${width}%` : `left:${50-width}%;width:${width}%`;
+  const why = s.reasons.map(r => {
+    const t = r.weight > 0 ? 'p' : r.weight < 0 ? 'n' : 'z';
+    const sign = r.weight > 0 ? '+' : '';
+    return `<div class="${t}"><em>${sign}${r.weight}</em><span>${r.text}</span></div>`;
+  }).join('');
+  return `<article class="card ${cls}">
+    <div class="head">
+      <div class="sym">${s.symbol}<small>${s.exchange}</small></div>
+      <div class="px">
+        <div class="v">${money(s.price)}</div>
+        <div class="d ${dir}">${s.change_pct >= 0 ? '▲' : '▼'} ${Math.abs(s.change_pct).toFixed(2)}%</div>
+      </div>
+    </div>
+    <div class="verdict">
+      <span class="tag">${s.signal}</span>
+      <span class="meter"><i style="${side}"></i></span>
+      <span class="score">${s.score > 0 ? '+' : ''}${s.score}/3</span>
+    </div>
+    ${ladder(s)}
+    <div class="stats">
+      <span><b>MA${s.ma_fast_period}</b> ${s.ma_fast ?? '—'}</span>
+      <span><b>MA${s.ma_slow_period}</b> ${s.ma_slow ?? '—'}</span>
+      <span><b>VWAP</b> ${s.vwap ?? '—'}</span>
+    </div>
+    <div class="why">${why}</div>
+    <p class="foot">${s.basis} · ${new Date(s.as_of).toLocaleString('en-IN',
+      {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit'})}</p>
+  </article>`;
+}
+
+/* ---------------- render ---------------- */
+function render(data){
+  const el = $('#body');
+  if(!active){
+    el.innerHTML = `<div class="empty"><p>No profiles yet. Each profile keeps its
+      own watchlist of up to 30 stocks.</p>
+      <button class="btn solid" onclick="newProfile()">Create a profile</button></div>`;
+    return;
+  }
+  const prof = profiles.find(p => p.id === active) || {};
+  const held = stocks.map(s => `<span class="held">${s.symbol}<small>${s.exchange}</small>
+      <button onclick="dropStock('${s.symbol}','${s.exchange}')"
+        aria-label="Remove ${s.symbol}">×</button></span>`).join('') ||
+    '<span class="foot">Nothing on this watchlist yet.</span>';
+  const picks = starter.filter(s => !stocks.some(x => x.symbol === s)).slice(0, 18)
+    .map(s => `<button onclick="addStock('${s}','NSE')">${s}</button>`).join('');
+
+  const counts = data ? `<div class="tally">
+      <span class="b"><b>${data.counts.buy}</b> buy</span>
+      <span class="s"><b>${data.counts.sell}</b> sell</span>
+      <span class="h"><b>${data.counts.hold}</b> hold</span></div>` : '';
+
+  el.innerHTML = `
+    <section class="editor">
+      <div class="field">
+        <input id="symIn" placeholder="Add a symbol — type it, e.g. RELIANCE"
+          onkeydown="if(event.key==='Enter')submitAdd()">
+        <select id="exIn"><option>NSE</option><option>BSE</option></select>
+        <button class="btn" onclick="submitAdd()">Add</button>
+      </div>
+      <div class="holding">${held}</div>
+      ${picks ? `<div class="sugg">${picks}</div>` : ''}
+    </section>
+
+    <div class="bar">
+      <span class="eyebrow">${prof.name} · ${stocks.length}/${limit} tracked</span>
+      ${counts}
+      <span class="spacer"></span>
+      <button class="btn ghost" onclick="delProfile()">Delete profile</button>
+      <button class="btn solid" onclick="refresh()" ${busy || !stocks.length ? 'disabled' : ''}>
+        ${busy ? 'Reading the tape…' : 'Run signals'}</button>
+    </div>
+
+    ${busy ? '<p class="eyebrow skel">Pulling quotes and recomputing levels…</p>' : ''}
+    ${data ? `<div class="grid">${data.signals.map(card).join('')}</div>` :
+      (!busy ? `<div class="empty"><p>${stocks.length ?
+        'Watchlist ready. Run signals to score every stock on it.' :
+        'Add a few stocks above, then run signals.'}</p></div>` : '')}
+  `;
+}
+
+function submitAdd(){
+  const v = $('#symIn').value.trim().toUpperCase();
+  if(!v) return;
+  addStock(v, $('#exIn').value);
+  $('#symIn').value = '';
+}
+
+loadProfiles();
+</script>
+</body>
+</html>
