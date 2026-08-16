@@ -1,0 +1,14 @@
+# The database holds YOUR watchlists, settings and signal history.
+# It must not be committed - a tracked copy would overwrite your live data
+# every time you pull, and your Telegram bot token lives in it.
+*.db
+*.db-journal
+*.sqlite3
+
+# Windows launcher creates this
+venv/
+__pycache__/
+*.pyc
+
+# Working archives
+*.zip
