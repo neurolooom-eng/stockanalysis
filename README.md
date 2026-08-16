@@ -84,6 +84,31 @@ MA20 is roughly the last 100 minutes, not 20 days.
 
 ---
 
+## Signing in
+
+Two accounts ship with the app:
+
+| User | Password |
+|---|---|
+| `pnk` | `123` |
+| `kau` | `123` |
+
+They are created the first time the app starts with an empty database, and the
+passwords are salted and hashed rather than kept as typed. The sign-in lasts 30
+days per device; **sign out** is next to the watchlist tabs.
+
+This is a **gate, not an identity system.** Both accounts see the same
+watchlists and the same settings. There is no password-change screen, no
+lockout after repeated guesses, and `123` is a password in name only — change it
+before this is reachable from the open internet by anything you care about.
+Proper accounts with private watchlists are the backlog item below.
+
+To change a password today, delete the `users` row and restart with the seed
+values edited in `app.py` (`SEED_USERS`), or ask for the password-change screen
+to be built.
+
+---
+
 ## Telegram alerts
 
 Open **Settings** in the app — nothing here needs a file edited.
@@ -229,22 +254,60 @@ out of every commit.
 
 ---
 
-## Hosting it
+## Publishing it to the web
 
 Because the server serves the page too, this deploys as **one** service, not two.
 
-**Render (free tier, no card):** new Web Service → connect the repo →
-Build `pip install -r requirements.txt` → Start `python app.py`. The app already
-reads Render's `PORT`, so nothing else to configure.
+### GitHub Pages will not work
 
-Two things to know before you rely on it:
+Pages serves static files only — there is no Python behind it. It would hand out
+`index.html` and then every `/api/...` call would 404: no watchlists, no signals,
+no settings, no alerts. Set **Settings → Pages → Source** to *None* so you don't
+leave a broken page published. You need a host that runs Python.
 
-- **Free tiers use a disposable disk.** Your profiles and watchlists live in a
-  SQLite file that gets wiped on every redeploy, and on Render's free plan when
-  the service sleeps. Attach a persistent disk and set `DB_PATH` to it, or move
-  to Postgres, if losing them would annoy you.
-- **Free services sleep** after idling, so the first request after a quiet spell
-  takes 30–60 seconds to wake.
+### Render (this repo has a blueprint for it)
+
+`render.yaml` is committed, so you don't have to fill in a form:
+
+1. Sign in at <https://render.com> with your GitHub account.
+2. **New → Blueprint**, pick `neurolooom-eng/stockanalysis`, choose this branch,
+   **Apply**.
+3. Wait for the first build. You get a URL like
+   `https://pivot-desk.onrender.com` — open it on either phone and sign in.
+
+To make alerts dependable, switch the service to a paid plan and uncomment the
+`disk:` block and `DB_PATH` in `render.yaml` — see below for why. Set the
+environment variable `HTTPS_ONLY=1` once you are on https, so the session cookie
+is only ever sent over an encrypted connection.
+
+Three things to know before relying on the free plan:
+
+- **Free services sleep** after roughly 15 minutes idle. A sleeping service runs
+  no alert loop, so alerts stop until someone opens the page, and the first
+  request after a quiet spell takes 30–60 seconds to wake. Free hosting and
+  reliable alerts are mutually exclusive.
+- **The free disk is wiped on every redeploy**, taking watchlists, signal history
+  and your bot token with it. A paid plan plus a persistent disk with `DB_PATH`
+  pointed at it fixes this.
+- **The hosted copy is a separate database** from the one on your PC. Watchlists
+  do not carry across, and if both copies run with alerts on, you get every
+  message twice — turn alerts off in one of them.
+
+Pricing and free-tier behaviour change; check Render's current terms rather than
+taking the above as gospel.
+
+### Or just tunnel from your PC
+
+If you only want to see it on your phone and your PC is on anyway (which alerts
+require regardless), skip hosting entirely:
+
+```powershell
+winget install --id Cloudflare.cloudflared
+cloudflared tunnel --url http://localhost:8000
+```
+
+It prints a public `https://…trycloudflare.com` address. No account, no deploy,
+and it uses the database you already have. The address changes each restart.
 
 ---
 
@@ -263,10 +326,10 @@ Two things to know before you rely on it:
   so alerts arrive only while the app is running — on a free host that sleeps
   when idle, that means not reliably. A machine that stays on, or a paid host,
   is what makes them dependable.
-- **No authentication.** Anyone with the URL sees and edits every watchlist, can
-  change the caps, and can read the Settings page — which is why the bot token is
-  only ever shown as its last four characters. Fine for you and one friend on a
-  URL you don't publish; not fine beyond that.
+- **The login is a gate, not real account security.** Two shared accounts, one
+  weak password each, no lockout, no password-change screen, and both users see
+  the same data. It keeps a passer-by out of a public URL. It is not protection
+  against anyone actually trying.
 - **The signal is arithmetic on past prices.** It has no view on what a stock
   will do next, and a 3/3 score is not a strong claim about the future. Paper
   trade it for a few weeks and check the history before risking money.
@@ -275,15 +338,16 @@ Two things to know before you rely on it:
 
 ## Sensible next steps
 
-1. **Broker feed** (Zerodha Kite, Angel One, Dhan) for genuinely live prices.
+1. **Proper accounts** (backlog): password-change screen, per-user private
+   watchlists, sensible passwords, and rate-limiting on the sign-in form. What
+   exists today is a gate over shared data.
+2. **Broker feed** (Zerodha Kite, Angel One, Dhan) for genuinely live prices.
    Only `analyse()` needs to change — everything downstream of it is
    source-agnostic.
-2. **Login** so you and your friend have separate, private watchlists, and the
-   Settings page isn't open to whoever has the URL.
 3. **Exchange holiday calendar**, so the checker doesn't bother polling on days
    the market never opened.
 4. **Alert thresholds** — e.g. only message on BUY/SELL, never on HOLD, or only
    above a score you choose.
 
 Done since the first build: Telegram alerts, the history and hit-rate view,
-configurable caps, and auto-refresh.
+configurable caps, auto-refresh, a sign-in gate, and a Render blueprint.

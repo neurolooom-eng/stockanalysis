@@ -149,6 +149,27 @@ main{padding:16px;max-width:1100px;margin:0 auto}
 .stats b{color:var(--muted);font-weight:500}
 .foot{margin-top:9px;font-family:var(--mono);font-size:10px;color:var(--dim)}
 
+/* ---------- sign in ---------- */
+.gate{position:fixed;inset:0;background:var(--ink);z-index:20;display:flex;
+  align-items:center;justify-content:center;padding:20px}
+/* Needed: the class sets display:flex, which outranks the UA rule for [hidden]
+   and would leave an invisible sheet swallowing every click on the page. */
+.gate[hidden]{display:none}
+.gate form{width:100%;max-width:330px;border:1px solid var(--rule);
+  background:var(--panel);padding:26px}
+.gate h2{font-family:var(--cond);font-size:24px;font-weight:700;letter-spacing:.06em;
+  text-transform:uppercase;margin-bottom:4px}
+.gate p{font-size:13px;color:var(--muted);margin-bottom:18px}
+.gate input{width:100%;background:var(--ink);border:1px solid var(--rule);
+  color:var(--paper);padding:10px 12px;margin-bottom:10px;border-radius:2px;
+  font-family:var(--mono);font-size:14px}
+.gate .btn{width:100%;margin-top:6px;text-align:center}
+.gate .err{color:var(--down);font-size:12px;font-family:var(--mono);min-height:16px;
+  margin:6px 0 0}
+.who{font-family:var(--mono);font-size:11px;color:var(--dim);margin-left:10px}
+.who button{color:var(--muted);text-decoration:underline;font-size:11px}
+.who button:hover{color:var(--brass)}
+
 /* ---------- view switch ---------- */
 .views{display:flex;gap:2px;margin-left:auto}
 .views button{font-family:var(--mono);font-size:11px;letter-spacing:.1em;
@@ -224,6 +245,18 @@ td.sig .BUY{color:var(--up)} td.sig .SELL{color:var(--down)} td.sig .HOLD{color:
   <span class="clock" id="clock"></span>
 </header>
 
+<div class="gate" id="gate" hidden>
+  <form onsubmit="event.preventDefault();signIn()">
+    <h2>Pivot Desk</h2>
+    <p>Sign in to see your watchlists.</p>
+    <input id="uid" placeholder="User name" autocomplete="username" autocapitalize="off"
+      autocorrect="off" spellcheck="false">
+    <input id="pwd" type="password" placeholder="Password" autocomplete="current-password">
+    <p class="err" id="gateErr"></p>
+    <button class="btn solid" type="submit">Sign in</button>
+  </form>
+</div>
+
 <nav class="rail" id="rail"></nav>
 
 <main>
@@ -238,7 +271,7 @@ td.sig .BUY{color:var(--up)} td.sig .SELL{color:var(--down)} td.sig .HOLD{color:
 <script>
 const $ = s => document.querySelector(s);
 let profiles = [], active = null, stocks = [], limit = 30, starter = [], busy = false;
-let view = 'signals', lastData = null, settings = null, hist = null, caps = {};
+let view = 'signals', lastData = null, settings = null, hist = null, caps = {}, me = null;
 let autoOn = localStorage.getItem('auto') === '1';
 let autoSecs = +(localStorage.getItem('autoSecs') || 60);
 let autoTimer = null;
@@ -259,8 +292,43 @@ function toast(msg){
 async function api(path, opts){
   const r = await fetch(path, {headers:{'Content-Type':'application/json'}, ...opts});
   const data = await r.json().catch(() => ({}));
+  if(r.status === 401 && path !== '/api/login'){ showGate(); throw new Error('Signed out'); }
   if(!r.ok) throw new Error(data.detail || 'Request failed');
   return data;
+}
+
+/* ---------------- sign in ---------------- */
+function showGate(){
+  clearInterval(autoTimer); autoTimer = null;
+  $('#gate').hidden = false;
+  $('#uid').focus();
+}
+
+async function signIn(){
+  const err = $('#gateErr');
+  err.textContent = '';
+  try{
+    await api('/api/login', {method:'POST', body:JSON.stringify(
+      {username: $('#uid').value, password: $('#pwd').value})});
+    $('#pwd').value = ''; $('#gate').hidden = true;
+    scheduleAuto();
+    await start();
+  }catch(e){ err.textContent = e.message; }
+}
+
+async function signOut(){
+  await api('/api/logout', {method:'POST'}).catch(() => {});
+  profiles = []; stocks = []; lastData = null; hist = null; settings = null;
+  active = null; me = null;
+  showGate();
+}
+
+async function start(){
+  try{
+    me = (await api('/api/me')).user;
+    $('#gate').hidden = true;
+    await loadProfiles();
+  }catch(e){ showGate(); }
 }
 
 function tickClock(){
@@ -306,6 +374,10 @@ function drawRail(){
     add.onclick = newProfile;
     rail.appendChild(add);
   }
+  const who = document.createElement('span');
+  who.className = 'who';
+  who.innerHTML = `${esc(me || '')} · <button onclick="signOut()">sign out</button>`;
+  rail.appendChild(who);
 }
 
 async function newProfile(){
@@ -710,7 +782,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 scheduleAuto();
-loadProfiles();
+start();
 </script>
 </body>
 </html>

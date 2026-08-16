@@ -8,7 +8,10 @@ Run:  python app.py       ->  http://localhost:8000
 """
 
 import asyncio
+import hashlib
+import hmac
 import os
+import secrets
 import sqlite3
 import threading
 import time
@@ -22,8 +25,8 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import requests
 import yfinance as yf
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 # ----------------------------------------------------------------------------
@@ -102,6 +105,12 @@ def init_db():
                 key         TEXT PRIMARY KEY,
                 value       TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS users (
+                username    TEXT PRIMARY KEY,
+                salt        TEXT NOT NULL,
+                pw_hash     TEXT NOT NULL,
+                created_at  TEXT NOT NULL
+            );
             """
         )
         # Migration for databases created before alerts existed. SQLite has no
@@ -153,6 +162,78 @@ def save_settings(values: Dict[str, str]) -> None:
             "INSERT INTO settings (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             [(k, str(v)) for k, v in values.items()])
+
+
+# ----------------------------------------------------------------------------
+# Login
+#
+# A gate, not an identity system: both users see the same watchlists. Passwords
+# are salted and hashed rather than stored as typed, and the session cookie is
+# signed, but there is no password-change screen, no lockout and no per-user
+# data yet. Those are the backlog item.
+# ----------------------------------------------------------------------------
+
+SEED_USERS = {"pnk": "123", "kau": "123"}
+SESSION_COOKIE = "pivotdesk_session"
+SESSION_DAYS = 30
+OPEN_PATHS = {"/api/health", "/api/login", "/api/me"}
+
+
+def hash_password(password: str, salt: str) -> str:
+    return hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt),
+                               120_000).hex()
+
+
+def seed_users() -> None:
+    with db() as conn:
+        if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]:
+            return
+        now = datetime.now().isoformat()
+        for name, password in SEED_USERS.items():
+            salt = secrets.token_hex(16)
+            conn.execute(
+                "INSERT INTO users (username, salt, pw_hash, created_at) VALUES (?,?,?,?)",
+                (name, salt, hash_password(password, salt), now))
+
+
+def check_password(username: str, password: str) -> bool:
+    with db() as conn:
+        row = conn.execute("SELECT salt, pw_hash FROM users WHERE username = ?",
+                           (username.strip().lower(),)).fetchone()
+    if not row:
+        return False
+    return hmac.compare_digest(hash_password(password, row["salt"]), row["pw_hash"])
+
+
+def session_secret() -> str:
+    """Generated once and kept in the database, so restarting the app does not
+    sign everyone out."""
+    secret = get_settings().get("session_secret", "")
+    if not secret:
+        secret = secrets.token_hex(32)
+        save_settings({"session_secret": secret})
+    return secret
+
+
+def make_token(username: str) -> str:
+    expires = int(time.time()) + SESSION_DAYS * 86400
+    body = f"{username}|{expires}"
+    sig = hmac.new(session_secret().encode(), body.encode(), hashlib.sha256).hexdigest()
+    return f"{body}|{sig}"
+
+
+def read_token(token: Optional[str]) -> Optional[str]:
+    if not token:
+        return None
+    try:
+        username, expires, sig = token.split("|")
+    except ValueError:
+        return None
+    expected = hmac.new(session_secret().encode(), f"{username}|{expires}".encode(),
+                        hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig, expected) or int(expires) < time.time():
+        return None
+    return username
 
 
 def market_is_open(now: Optional[datetime] = None) -> bool:
@@ -578,9 +659,54 @@ class AlertsIn(BaseModel):
     alerts: bool
 
 
-init_db()  # runs at import, so the tables exist however the app is started
+class LoginIn(BaseModel):
+    username: str
+    password: str
 
-app = FastAPI(title="Pivot Desk", version="2.1.0", lifespan=lifespan)
+
+init_db()   # runs at import, so the tables exist however the app is started
+seed_users()
+
+app = FastAPI(title="Pivot Desk", version="2.2.0", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def require_login(request: Request, call_next):
+    """Everything under /api/ needs a session except the handful of paths that
+    have to work before you have one. index.html is served to anyone - it holds
+    no data, and shows the sign-in form until the API answers."""
+    path = request.url.path
+    if path.startswith("/api/") and path not in OPEN_PATHS:
+        if not read_token(request.cookies.get(SESSION_COOKIE)):
+            return JSONResponse({"detail": "Sign in to continue"}, status_code=401)
+    return await call_next(request)
+
+
+@app.post("/api/login")
+def login(body: LoginIn, response: Response):
+    username = body.username.strip().lower()
+    if not check_password(username, body.password):
+        raise HTTPException(401, "Wrong user name or password")
+    response.set_cookie(
+        SESSION_COOKIE, make_token(username), max_age=SESSION_DAYS * 86400,
+        httponly=True, samesite="lax",
+        # Sent over plain HTTP on localhost, HTTPS-only once hosted.
+        secure=os.environ.get("HTTPS_ONLY", "0") == "1")
+    return {"user": username}
+
+
+@app.post("/api/logout")
+def logout(response: Response):
+    response.delete_cookie(SESSION_COOKIE)
+    return {"ok": True}
+
+
+@app.get("/api/me")
+def me(request: Request):
+    user = read_token(request.cookies.get(SESSION_COOKIE))
+    if not user:
+        raise HTTPException(401, "Not signed in")
+    return {"user": user}
 
 
 @app.get("/")

@@ -26,15 +26,16 @@ Repo: https://github.com/neurolooom-eng/stockanalysis
 Four files, deliberately. One folder, no subdirectories, no build step.
 
 ```
-app.py            FastAPI: API + indicators + alert loop + serves the page
+app.py            FastAPI: API + indicators + alert loop + login + serves the page
 index.html        Whole frontend, vanilla JS, no framework
 requirements.txt
 run.bat           Windows launcher (venv, install, start, open browser)
+render.yaml       Render blueprint, so hosting needs no form-filling
 ```
 
 `app.py` serves `index.html` at `/`, so it's a single service to run and a single
 service to deploy. Storage is SQLite (`profiles`, `watchlist`, `signal_log`,
-`settings`). Data comes from yfinance.
+`settings`, `users`). Data comes from yfinance.
 
 Start: double-click `run.bat`, or `venv\Scripts\python.exe app.py`.
 
@@ -67,8 +68,13 @@ the README for the recovery command if a pull ever removes it.
 - **A symbol's first sighting never alerts.** It is logged silently, so adding
   thirty stocks doesn't fire thirty messages.
 - **The bot token is never returned by the API in full** — `/api/settings` sends
-  back only the last four characters. There is no login, so the Settings page is
-  open to anyone who can reach the app.
+  back only the last four characters.
+- **The login is a gate over shared data, by explicit decision.** Two seeded
+  users (`pnk`, `kau`, both `123`), salted+hashed, signed HMAC cookie, everything
+  under `/api/` closed except health/login/me. The owner asked for exactly this
+  and moved real accounts to the backlog — don't gold-plate it unasked.
+- **GitHub Pages cannot host this** (static only, no Python). The owner tried;
+  the answer is a Python host, and `render.yaml` is committed for that.
 - Fetches run in a thread pool; sequential fetching of 30 symbols was too slow.
 
 ## Known limitations
@@ -85,10 +91,10 @@ the README for the recovery command if a pull ever removes it.
 
 ## Next steps, in the owner's priority order
 
-1. **Broker feed** (Zerodha Kite / Angel One / Dhan) for genuinely live prices.
+1. **Proper accounts** (owner's own backlog item): password-change screen,
+   per-user private watchlists, real passwords, rate-limited sign-in.
+2. **Broker feed** (Zerodha Kite / Angel One / Dhan) for genuinely live prices.
    Only `analyse()` needs to change.
-2. **Login**, so the two users get private watchlists and the Settings page
-   isn't world-writable.
 3. **Holiday calendar** for the alert loop.
 4. **Alert thresholds** — signal types or score levels worth messaging about.
 

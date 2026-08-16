@@ -1,0 +1,31 @@
+# Render Blueprint - lets you deploy without filling in a form.
+#
+#   Render dashboard -> New -> Blueprint -> pick this repo -> Apply
+#
+# The free plan is enough to SEE the dashboard on the web, but read the two
+# warnings in the README before relying on it: a free service sleeps after
+# about 15 minutes idle (so the alert loop stops), and its disk is wiped on
+# every redeploy (so watchlists, history and the bot token are lost).
+#
+# To make it dependable: change plan to "starter", then uncomment the disk
+# block and the DB_PATH variable below so the database survives redeploys.
+# Disks are not available on the free plan.
+
+services:
+  - type: web
+    name: pivot-desk
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      # Uncomment together with the disk block below (paid plans only).
+      # - key: DB_PATH
+      #   value: /var/data/stock_monitor.db
+
+    # disk:
+    #   name: pivot-desk-data
+    #   mountPath: /var/data
+    #   sizeGB: 1
