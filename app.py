@@ -7,15 +7,20 @@ thing to run and one thing to deploy.
 Run:  python app.py       ->  http://localhost:8000
 """
 
+import asyncio
 import os
 import sqlite3
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from contextlib import asynccontextmanager
+from datetime import datetime, time as dtime
 from pathlib import Path
 from typing import Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
+import requests
 import yfinance as yf
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -30,15 +35,27 @@ BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = os.environ.get("DB_PATH", str(BASE_DIR / "stock_monitor.db"))
 PORT = int(os.environ.get("PORT", 8000))
 
-MAX_STOCKS_PER_PROFILE = 30
+# Starting caps only - both are editable at runtime from the admin panel and
+# are read from the settings table on every request. See caps().
+DEFAULT_MAX_PROFILES = int(os.environ.get("MAX_PROFILES", 10))
+DEFAULT_MAX_STOCKS = int(os.environ.get("MAX_STOCKS", 30))
 CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL", 60))
 INTRADAY_INTERVAL = os.environ.get("INTERVAL", "5m")  # 1m/2m/5m/15m/30m/60m
 MA_FAST = int(os.environ.get("MA_FAST", 20))          # in bars, not days
 MA_SLOW = int(os.environ.get("MA_SLOW", 50))
 
-app = FastAPI(title="Stock Monitor", version="2.0.0")
+IST = ZoneInfo("Asia/Kolkata")
+MARKET_OPEN = dtime(9, 15)
+MARKET_CLOSE = dtime(15, 30)
+ALERT_TICK_SECONDS = 20      # how often the loop wakes to see if a sweep is due
+TELEGRAM_TIMEOUT = 15
 
 _cache: Dict[str, tuple] = {}  # symbol -> (timestamp, payload)
+_log_lock = threading.Lock()   # guards the read-then-write in score_profile()
+# Reported by /api/settings so the settings panel can show whether the
+# background loop is actually running, and why it last failed if it did.
+_alert_state: Dict[str, Optional[str]] = {
+    "last_run": None, "last_sent": None, "last_error": None, "running": False}
 
 
 # ----------------------------------------------------------------------------
@@ -79,8 +96,73 @@ def init_db():
                 logged_at   TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_log ON signal_log(profile_id, logged_at);
+            CREATE INDEX IF NOT EXISTS idx_log_symbol
+                ON signal_log(profile_id, symbol, id);
+            CREATE TABLE IF NOT EXISTS settings (
+                key         TEXT PRIMARY KEY,
+                value       TEXT NOT NULL
+            );
             """
         )
+        # Migration for databases created before alerts existed. SQLite has no
+        # "ADD COLUMN IF NOT EXISTS", so check the table first.
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(profiles)")}
+        if "alerts" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN alerts INTEGER NOT NULL DEFAULT 1")
+
+
+# ----------------------------------------------------------------------------
+# Settings (stored in the database, so nothing has to be edited in a file)
+# ----------------------------------------------------------------------------
+
+SETTING_DEFAULTS = {
+    "telegram_token": "",
+    "telegram_chat_ids": "",
+    "alerts_enabled": "0",
+    "alert_interval_minutes": "5",
+    "market_hours_only": "1",
+    # Caps are settings, not constants, so they can be changed from the admin
+    # panel without touching code. These are the starting values only.
+    "max_profiles": str(DEFAULT_MAX_PROFILES),
+    "max_stocks_per_profile": str(DEFAULT_MAX_STOCKS),
+}
+
+
+def caps() -> Dict[str, int]:
+    cfg = get_settings()
+    def num(key, fallback):
+        try:
+            return max(1, min(500, int(cfg[key])))
+        except (TypeError, ValueError):
+            return fallback
+    return {"max_profiles": num("max_profiles", DEFAULT_MAX_PROFILES),
+            "max_stocks_per_profile": num("max_stocks_per_profile", DEFAULT_MAX_STOCKS)}
+
+
+def get_settings() -> Dict[str, str]:
+    with db() as conn:
+        rows = conn.execute("SELECT key, value FROM settings").fetchall()
+    out = dict(SETTING_DEFAULTS)
+    out.update({r["key"]: r["value"] for r in rows})
+    return out
+
+
+def save_settings(values: Dict[str, str]) -> None:
+    with db() as conn:
+        conn.executemany(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [(k, str(v)) for k, v in values.items()])
+
+
+def market_is_open(now: Optional[datetime] = None) -> bool:
+    """NSE/BSE cash session: Mon-Fri, 09:15-15:30 IST. Holidays are not
+    modelled - on a holiday the loop simply finds no new bars, so no signal
+    changes and no alerts."""
+    now = (now or datetime.now(IST)).astimezone(IST)
+    if now.weekday() > 4:
+        return False
+    return MARKET_OPEN <= now.time() <= MARKET_CLOSE
 
 
 # ----------------------------------------------------------------------------
@@ -279,11 +361,11 @@ def analyse(symbol: str, exchange: str) -> Dict:
             "score": score,
             "confidence": confidence,
             "reasons": [{"kind": k, "weight": w, "text": t} for k, w, t in reasons],
-            "ma_fast": round(ma_fast, 2) if ma_fast else None,
-            "ma_slow": round(ma_slow, 2) if ma_slow else None,
+            "ma_fast": round(ma_fast, 2) if ma_fast is not None else None,
+            "ma_slow": round(ma_slow, 2) if ma_slow is not None else None,
             "ma_fast_period": MA_FAST,
             "ma_slow_period": MA_SLOW,
-            "vwap": round(vwap, 2) if vwap else None,
+            "vwap": round(vwap, 2) if vwap is not None else None,
             "pivots": {k: round(v, 2) for k, v in piv.items()},
             "as_of": as_of,
             "basis": basis,
@@ -293,6 +375,180 @@ def analyse(symbol: str, exchange: str) -> Dict:
 
     _cache[key] = (time.time(), out)
     return out
+
+
+# ----------------------------------------------------------------------------
+# Scoring a whole watchlist, and logging only what changed
+# ----------------------------------------------------------------------------
+
+def score_profile(profile_id: int) -> Dict:
+    """
+    Score every stock on a profile and record CHANGES ONLY.
+
+    The dashboard polls, and the alert loop sweeps, so writing a row per run
+    would bury the real transitions under thousands of duplicates and make the
+    hit rate meaningless. A row is written when a symbol's signal differs from
+    the last one logged for it - which is also exactly when an alert is due.
+    """
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT symbol, exchange FROM watchlist WHERE profile_id=? ORDER BY symbol",
+            (profile_id,)).fetchall()
+    # Fetch in parallel. Sequentially, 30 stocks takes a minute or more.
+    if rows:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda r: analyse(r["symbol"], r["exchange"]), rows))
+    else:
+        results = []
+
+    good = [r for r in results if "error" not in r]
+    changes: List[Dict] = []
+    if good:
+        now = datetime.now().isoformat()
+        # The dashboard and the alert loop can both land here at once; the
+        # read-then-write below would otherwise log the same change twice.
+        with _log_lock, db() as conn:
+            for r in good:
+                prev = conn.execute(
+                    "SELECT signal, price, logged_at FROM signal_log"
+                    " WHERE profile_id=? AND symbol=? ORDER BY id DESC LIMIT 1",
+                    (profile_id, r["symbol"])).fetchone()
+                if prev and prev["signal"] == r["signal"]:
+                    continue
+                conn.execute(
+                    "INSERT INTO signal_log (profile_id, symbol, signal, score, price, logged_at)"
+                    " VALUES (?,?,?,?,?,?)",
+                    (profile_id, r["symbol"], r["signal"], r["score"], r["price"], now))
+                changes.append({
+                    "symbol": r["symbol"], "exchange": r["exchange"],
+                    "previous": prev["signal"] if prev else None,
+                    "signal": r["signal"], "price": r["price"], "score": r["score"],
+                    "reasons": r["reasons"], "logged_at": now,
+                })
+
+    order = {"BUY": 0, "SELL": 1, "HOLD": 2}
+    good.sort(key=lambda r: (order.get(r["signal"], 3), -r["confidence"]))
+    failed = [r for r in results if "error" in r]
+    return {
+        "generated_at": datetime.now().isoformat(),
+        "signals": good + failed,
+        "changes": changes,
+        "counts": {
+            "buy": sum(1 for r in good if r["signal"] == "BUY"),
+            "sell": sum(1 for r in good if r["signal"] == "SELL"),
+            "hold": sum(1 for r in good if r["signal"] == "HOLD"),
+            "failed": len(failed)},
+    }
+
+
+# ----------------------------------------------------------------------------
+# Telegram alerts
+# ----------------------------------------------------------------------------
+
+def chat_id_list(raw: str) -> List[str]:
+    return [c.strip() for c in raw.replace(";", ",").split(",") if c.strip()]
+
+
+def send_telegram(token: str, chat_ids: List[str], text: str) -> Dict:
+    """Returns {"sent": n, "errors": [...]}. Never raises - a dead bot token
+    must not take the dashboard down with it."""
+    sent, errors = 0, []
+    for chat in chat_ids:
+        try:
+            resp = requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat, "text": text,
+                      "disable_web_page_preview": True},
+                timeout=TELEGRAM_TIMEOUT)
+            body = resp.json() if resp.content else {}
+            if resp.ok and body.get("ok"):
+                sent += 1
+            else:
+                errors.append(f"{chat}: {body.get('description') or resp.status_code}")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{chat}: {type(exc).__name__}: {exc}")
+    return {"sent": sent, "errors": errors}
+
+
+ARROW = {"BUY": "▲", "SELL": "▼", "HOLD": "–"}
+
+
+def format_alert(profile_name: str, change: Dict) -> str:
+    was = change["previous"] or "new"
+    lines = [
+        f"{ARROW.get(change['signal'], '')} {change['symbol']} ({change['exchange']})"
+        f"  {was} → {change['signal']}",
+        f"₹{change['price']:,.2f}   score {change['score']:+g}/3   [{profile_name}]",
+    ]
+    lines += [f"  • {r['text']}" for r in change.get("reasons", [])]
+    lines.append("Delayed Yahoo data. Arithmetic on past prices, not advice.")
+    return "\n".join(lines)
+
+
+def run_alert_sweep() -> Dict:
+    """One pass over every alert-enabled profile. Blocking; called in a thread."""
+    cfg = get_settings()
+    token = cfg["telegram_token"].strip()
+    chats = chat_id_list(cfg["telegram_chat_ids"])
+    with db() as conn:
+        profiles = conn.execute(
+            "SELECT id, name FROM profiles WHERE alerts = 1 ORDER BY id").fetchall()
+
+    total_changes, total_sent, errors = 0, 0, []
+    for prof in profiles:
+        result = score_profile(prof["id"])
+        for change in result["changes"]:
+            # A symbol with no history is seeded silently - the first sweep
+            # after adding 30 stocks should not fire 30 messages.
+            if change["previous"] is None:
+                continue
+            total_changes += 1
+            outcome = send_telegram(token, chats, format_alert(prof["name"], change))
+            total_sent += outcome["sent"]
+            errors.extend(outcome["errors"])
+
+    _alert_state["last_run"] = datetime.now(IST).isoformat()
+    if total_sent:
+        _alert_state["last_sent"] = _alert_state["last_run"]
+    _alert_state["last_error"] = "; ".join(errors[:3]) if errors else None
+    return {"changes": total_changes, "sent": total_sent, "errors": errors}
+
+
+async def alert_loop():
+    """Wakes every ALERT_TICK_SECONDS so interval or on/off changes made in the
+    settings panel take effect without a restart."""
+    last_sweep = 0.0
+    while True:
+        try:
+            cfg = get_settings()
+            interval = max(1, int(cfg.get("alert_interval_minutes") or 5)) * 60
+            ready = (cfg["alerts_enabled"] == "1"
+                     and cfg["telegram_token"].strip()
+                     and chat_id_list(cfg["telegram_chat_ids"])
+                     and (cfg["market_hours_only"] != "1" or market_is_open()))
+            if ready and time.time() - last_sweep >= interval:
+                last_sweep = time.time()
+                await asyncio.to_thread(run_alert_sweep)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the loop must survive anything
+            _alert_state["last_error"] = f"{type(exc).__name__}: {exc}"
+        await asyncio.sleep(ALERT_TICK_SECONDS)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    task = asyncio.create_task(alert_loop())
+    _alert_state["running"] = True
+    try:
+        yield
+    finally:
+        _alert_state["running"] = False
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 # ----------------------------------------------------------------------------
@@ -308,7 +564,23 @@ class StockIn(BaseModel):
     exchange: str = "NSE"
 
 
+class SettingsIn(BaseModel):
+    telegram_token: Optional[str] = None
+    telegram_chat_ids: Optional[str] = None
+    alerts_enabled: Optional[bool] = None
+    alert_interval_minutes: Optional[int] = None
+    market_hours_only: Optional[bool] = None
+    max_profiles: Optional[int] = None
+    max_stocks_per_profile: Optional[int] = None
+
+
+class AlertsIn(BaseModel):
+    alerts: bool
+
+
 init_db()  # runs at import, so the tables exist however the app is started
+
+app = FastAPI(title="Pivot Desk", version="2.1.0", lifespan=lifespan)
 
 
 @app.get("/")
@@ -331,35 +603,53 @@ def symbols():
 def list_profiles():
     with db() as conn:
         rows = conn.execute(
-            """SELECT p.id, p.name, p.created_at, COUNT(w.id) AS stock_count
+            """SELECT p.id, p.name, p.created_at, p.alerts, COUNT(w.id) AS stock_count
                FROM profiles p LEFT JOIN watchlist w ON w.profile_id = p.id
                GROUP BY p.id ORDER BY p.id"""
         ).fetchall()
-    return {"profiles": [dict(r) for r in rows]}
+    return {"profiles": [dict(r) for r in rows], **caps()}
 
 
 @app.post("/api/profiles")
 def create_profile(body: ProfileIn):
     name = body.name.strip()
     if not name:
-        raise HTTPException(400, "Profile name cannot be empty")
+        raise HTTPException(400, "Watchlist name cannot be empty")
+    limit = caps()["max_profiles"]
     with db() as conn:
+        existing = conn.execute("SELECT COUNT(*) FROM profiles").fetchone()[0]
+        if existing >= limit:
+            raise HTTPException(
+                400, f"You already have {existing} watchlists, and the cap is {limit}. "
+                     f"Delete one, or raise the cap in Settings.")
         try:
             cur = conn.execute(
                 "INSERT INTO profiles (name, created_at) VALUES (?, ?)",
                 (name, datetime.now().isoformat()))
         except sqlite3.IntegrityError:
-            raise HTTPException(400, f"A profile named '{name}' already exists")
-        return {"id": cur.lastrowid, "name": name, "stock_count": 0}
+            raise HTTPException(400, f"A watchlist named '{name}' already exists")
+        return {"id": cur.lastrowid, "name": name, "stock_count": 0, "alerts": 1}
 
 
 @app.delete("/api/profiles/{profile_id}")
 def delete_profile(profile_id: int):
     with db() as conn:
+        if not conn.execute("SELECT 1 FROM profiles WHERE id = ?", (profile_id,)).fetchone():
+            raise HTTPException(404, "Watchlist not found")
         conn.execute("DELETE FROM watchlist WHERE profile_id = ?", (profile_id,))
         conn.execute("DELETE FROM signal_log WHERE profile_id = ?", (profile_id,))
         conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
     return {"deleted": profile_id}
+
+
+@app.post("/api/profiles/{profile_id}/alerts")
+def set_profile_alerts(profile_id: int, body: AlertsIn):
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM profiles WHERE id = ?", (profile_id,)).fetchone():
+            raise HTTPException(404, "Watchlist not found")
+        conn.execute("UPDATE profiles SET alerts = ? WHERE id = ?",
+                     (1 if body.alerts else 0, profile_id))
+    return {"id": profile_id, "alerts": body.alerts}
 
 
 @app.get("/api/profiles/{profile_id}/stocks")
@@ -367,12 +657,12 @@ def get_stocks(profile_id: int):
     with db() as conn:
         prof = conn.execute("SELECT * FROM profiles WHERE id = ?", (profile_id,)).fetchone()
         if not prof:
-            raise HTTPException(404, "Profile not found")
+            raise HTTPException(404, "Watchlist not found")
         rows = conn.execute(
             "SELECT symbol, exchange FROM watchlist WHERE profile_id = ? ORDER BY symbol",
             (profile_id,)).fetchall()
     return {"profile": dict(prof), "stocks": [dict(r) for r in rows],
-            "limit": MAX_STOCKS_PER_PROFILE}
+            "limit": caps()["max_stocks_per_profile"]}
 
 
 @app.post("/api/profiles/{profile_id}/stocks")
@@ -383,15 +673,16 @@ def add_stock(profile_id: int, body: StockIn):
         raise HTTPException(400, "Enter a symbol")
     if exchange not in ("NSE", "BSE"):
         raise HTTPException(400, "Exchange must be NSE or BSE")
+    limit = caps()["max_stocks_per_profile"]
     with db() as conn:
         if not conn.execute("SELECT 1 FROM profiles WHERE id = ?", (profile_id,)).fetchone():
-            raise HTTPException(404, "Profile not found")
+            raise HTTPException(404, "Watchlist not found")
         count = conn.execute(
             "SELECT COUNT(*) FROM watchlist WHERE profile_id = ?", (profile_id,)).fetchone()[0]
-        if count >= MAX_STOCKS_PER_PROFILE:
+        if count >= limit:
             raise HTTPException(
-                400, f"This profile already holds {MAX_STOCKS_PER_PROFILE} stocks. "
-                     f"Remove one to add another.")
+                400, f"This watchlist already holds {limit} stocks. "
+                     f"Remove one, or raise the cap in Settings.")
         try:
             conn.execute(
                 "INSERT INTO watchlist (profile_id, symbol, exchange, added_at) VALUES (?,?,?,?)",
@@ -412,46 +703,151 @@ def remove_stock(profile_id: int, symbol: str, exchange: str = "NSE"):
 
 @app.get("/api/profiles/{profile_id}/signals")
 def signals(profile_id: int):
-    with db() as conn:
-        rows = conn.execute(
-            "SELECT symbol, exchange FROM watchlist WHERE profile_id=? ORDER BY symbol",
-            (profile_id,)).fetchall()
-    # Fetch in parallel. Sequentially, 30 stocks takes a minute or more.
-    if rows:
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            results = list(pool.map(lambda r: analyse(r["symbol"], r["exchange"]), rows))
-    else:
-        results = []
-
-    good = [r for r in results if "error" not in r]
-    if good:
-        with db() as conn:
-            conn.executemany(
-                "INSERT INTO signal_log (profile_id, symbol, signal, score, price, logged_at)"
-                " VALUES (?,?,?,?,?,?)",
-                [(profile_id, r["symbol"], r["signal"], r["score"], r["price"],
-                  datetime.now().isoformat()) for r in good])
-
-    order = {"BUY": 0, "SELL": 1, "HOLD": 2}
-    good.sort(key=lambda r: (order.get(r["signal"], 3), -r["confidence"]))
-    failed = [r for r in results if "error" in r]
-    return {"generated_at": datetime.now().isoformat(),
-            "signals": good + failed,
-            "counts": {
-                "buy": sum(1 for r in good if r["signal"] == "BUY"),
-                "sell": sum(1 for r in good if r["signal"] == "SELL"),
-                "hold": sum(1 for r in good if r["signal"] == "HOLD"),
-                "failed": len(failed)}}
+    return score_profile(profile_id)
 
 
 @app.get("/api/profiles/{profile_id}/history")
-def history(profile_id: int, limit: int = 100):
+def history(profile_id: int, limit: int = 200):
+    """
+    Every logged signal change, plus how the price had moved by the time each
+    one was replaced. This is a record of what the score did, on delayed data,
+    ignoring brokerage, slippage and the fact that you cannot trade the close
+    of a 5-minute bar. Read it as a sanity check, not a backtest.
+    """
     with db() as conn:
-        rows = conn.execute(
-            """SELECT symbol, signal, score, price, logged_at FROM signal_log
-               WHERE profile_id=? ORDER BY id DESC LIMIT ?""",
-            (profile_id, min(limit, 500))).fetchall()
-    return {"history": [dict(r) for r in rows]}
+        rows = [dict(r) for r in conn.execute(
+            """SELECT id, symbol, signal, score, price, logged_at FROM signal_log
+               WHERE profile_id=? ORDER BY id ASC""", (profile_id,)).fetchall()]
+
+    by_symbol: Dict[str, List[Dict]] = {}
+    for r in rows:
+        by_symbol.setdefault(r["symbol"], []).append(r)
+
+    resolved: Dict[int, Dict] = {}
+    for series in by_symbol.values():
+        for entry, nxt in zip(series, series[1:]):
+            move = ((nxt["price"] - entry["price"]) / entry["price"] * 100
+                    if entry["price"] else 0.0)
+            hit = None
+            if entry["signal"] == "BUY":
+                hit = move > 0
+            elif entry["signal"] == "SELL":
+                hit = move < 0
+            resolved[entry["id"]] = {
+                "exit_price": nxt["price"], "exit_at": nxt["logged_at"],
+                "move_pct": round(move, 2), "hit": hit}
+
+    tally = {"BUY": [0, 0], "SELL": [0, 0]}  # signal -> [resolved, hits]
+    for entry_id, out in resolved.items():
+        sig = next(r["signal"] for r in rows if r["id"] == entry_id)
+        if sig in tally:
+            tally[sig][0] += 1
+            tally[sig][1] += 1 if out["hit"] else 0
+
+    def pct(pair):
+        return round(pair[1] / pair[0] * 100, 1) if pair[0] else None
+
+    out_rows = []
+    for r in reversed(rows):
+        out_rows.append({**r, **resolved.get(r["id"], {"exit_price": None,
+                                                       "exit_at": None,
+                                                       "move_pct": None,
+                                                       "hit": None})})
+    return {
+        "history": out_rows[:min(limit, 500)],
+        "total": len(rows),
+        "summary": {
+            "buy": {"resolved": tally["BUY"][0], "hits": tally["BUY"][1],
+                    "pct": pct(tally["BUY"])},
+            "sell": {"resolved": tally["SELL"][0], "hits": tally["SELL"][1],
+                     "pct": pct(tally["SELL"])},
+        },
+    }
+
+
+@app.delete("/api/profiles/{profile_id}/history")
+def clear_history(profile_id: int):
+    with db() as conn:
+        cur = conn.execute("DELETE FROM signal_log WHERE profile_id=?", (profile_id,))
+    return {"cleared": cur.rowcount}
+
+
+# ---------------------------- settings / admin ------------------------------
+
+@app.get("/api/settings")
+def read_settings():
+    cfg = get_settings()
+    token = cfg["telegram_token"].strip()
+    return {
+        # The token is never sent back in full - only enough to recognise it.
+        "telegram_configured": bool(token),
+        "telegram_token_hint": f"…{token[-4:]}" if len(token) >= 4 else "",
+        "telegram_chat_ids": cfg["telegram_chat_ids"],
+        "alerts_enabled": cfg["alerts_enabled"] == "1",
+        "alert_interval_minutes": int(cfg["alert_interval_minutes"] or 5),
+        "market_hours_only": cfg["market_hours_only"] == "1",
+        **caps(),
+        "market_open_now": market_is_open(),
+        "loop": dict(_alert_state),
+    }
+
+
+@app.post("/api/settings")
+def write_settings(body: SettingsIn):
+    updates: Dict[str, str] = {}
+    if body.telegram_token is not None:
+        # An empty string means "leave it alone"; clearing is explicit.
+        token = body.telegram_token.strip()
+        if token:
+            updates["telegram_token"] = token
+    if body.telegram_chat_ids is not None:
+        updates["telegram_chat_ids"] = ",".join(chat_id_list(body.telegram_chat_ids))
+    if body.alerts_enabled is not None:
+        updates["alerts_enabled"] = "1" if body.alerts_enabled else "0"
+    if body.market_hours_only is not None:
+        updates["market_hours_only"] = "1" if body.market_hours_only else "0"
+    if body.alert_interval_minutes is not None:
+        updates["alert_interval_minutes"] = str(max(1, min(180, body.alert_interval_minutes)))
+    if body.max_profiles is not None:
+        updates["max_profiles"] = str(max(1, min(500, body.max_profiles)))
+    if body.max_stocks_per_profile is not None:
+        updates["max_stocks_per_profile"] = str(max(1, min(500, body.max_stocks_per_profile)))
+    if updates:
+        save_settings(updates)
+    return read_settings()
+
+
+@app.delete("/api/settings/telegram")
+def clear_telegram():
+    save_settings({"telegram_token": "", "telegram_chat_ids": "", "alerts_enabled": "0"})
+    return read_settings()
+
+
+@app.post("/api/telegram/test")
+def telegram_test():
+    cfg = get_settings()
+    token, chats = cfg["telegram_token"].strip(), chat_id_list(cfg["telegram_chat_ids"])
+    if not token:
+        raise HTTPException(400, "Save a bot token first")
+    if not chats:
+        raise HTTPException(400, "Add at least one chat ID first")
+    result = send_telegram(
+        token, chats,
+        "Pivot Desk is connected. Alerts will arrive here when a stock's "
+        "signal changes.")
+    if not result["sent"]:
+        raise HTTPException(400, "; ".join(result["errors"]) or "Telegram refused the message")
+    return result
+
+
+@app.post("/api/alerts/run")
+def alerts_run_now():
+    """Force one sweep regardless of schedule or market hours - the honest way
+    to check the alert path works end to end."""
+    cfg = get_settings()
+    if not cfg["telegram_token"].strip() or not chat_id_list(cfg["telegram_chat_ids"]):
+        raise HTTPException(400, "Set up Telegram first")
+    return run_alert_sweep()
 
 
 if __name__ == "__main__":

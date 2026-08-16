@@ -38,6 +38,11 @@ Mac/Linux form, which is why PowerShell rejected it.
 - Pick **NSE** or **BSE** — they're different tickers on Yahoo (`.NS` vs `.BO`)
   and the prices differ slightly.
 - **Run signals** scores everything on the active watchlist.
+- **Auto** re-runs the scoring on a timer (30s / 1m / 2m / 5m) while the tab is
+  open. It pauses when the tab is hidden and catches up when you come back, so a
+  forgotten tab doesn't sit there hammering Yahoo.
+
+Three views along the top: **Signals**, **History** and **Settings**.
 
 Each card shows the pivot ladder with live price marked on it, and a breakdown of
 exactly which conditions produced the score. Nothing is a black box — if a stock
@@ -79,9 +84,81 @@ MA20 is roughly the last 100 minutes, not 20 days.
 
 ---
 
-## Settings
+## Telegram alerts
 
-Set these as environment variables before starting if you want to change them:
+Open **Settings** in the app — nothing here needs a file edited.
+
+1. On Telegram, message **@BotFather**, send `/newbot`, follow the two prompts.
+   It replies with a token like `123456789:AAE...`. Paste it into **Bot token**.
+2. Message your new bot once from each phone that should receive alerts (a bot
+   cannot start a conversation with you).
+3. Open `https://api.telegram.org/bot<your-token>/getUpdates` in a browser and
+   read off `"chat":{"id":...}` for each phone. Put those numbers, comma
+   separated, into **Chat IDs**.
+4. Press **Save**, then **Send test message**. If both phones buzz, you're done —
+   tick **Alerts on**.
+
+The background checker then re-scores every alert-enabled watchlist on your
+chosen interval and messages you **only when a stock's signal changes** —
+HOLD → BUY, BUY → SELL and so on. A stock sitting on BUY does not message you
+every five minutes, and a symbol seen for the first time is recorded silently so
+adding thirty stocks doesn't fire thirty messages.
+
+Other controls there:
+
+- **Only during market hours** — restricts checks to 09:15–15:30 IST, Mon–Fri.
+  Exchange holidays aren't modelled; on a holiday there are no new bars, so
+  nothing changes and nothing is sent.
+- **Alert these watchlists** — per-watchlist on/off, so a long-term list doesn't
+  ping you all day.
+- **Check now** — forces one sweep immediately, ignoring the schedule and the
+  market-hours setting. The honest way to prove the whole path works.
+- The status block at the bottom reports whether the checker is running, when it
+  last ran, and the last error Telegram returned.
+
+The token is stored in the database on your machine and is never sent back to
+the page in full — only the last four characters, so you can tell which one is
+saved.
+
+---
+
+## History and hit rate
+
+**History** lists every time a stock's signal changed on that watchlist, and what
+the price was doing when that signal was replaced. The tiles at the top give the
+share of BUY signals where price was higher at the next change, and of SELL
+signals where it was lower.
+
+A row is written **only when a signal actually changes**, so the table is a list
+of real transitions rather than one row per refresh.
+
+Read the percentages carefully. They are computed on delayed Yahoo prices, at
+bar closes you could not actually have traded, with no brokerage, taxes or
+slippage, and HOLD is not scored at all. A dozen signals tells you nothing.
+It is a sanity check on what the score has been doing, not a backtest, and
+certainly not evidence it will keep doing it.
+
+---
+
+## Caps
+
+Set in **Settings → Caps**, stored in the database, changeable whenever you like:
+
+| Cap | Default |
+|---|---|
+| Watchlists | 10 |
+| Stocks per watchlist | 30 |
+
+Both are enforced by the server, not just hidden in the page. Raising the
+per-watchlist cap makes each refresh slower and makes Yahoo more likely to
+rate-limit you — 30 is a comfortable ceiling, not an arbitrary one.
+
+---
+
+## Settings (environment variables)
+
+Set these before starting if you want to change them. Everything in the Settings
+page is stored in the database instead and needs no restart.
 
 | Variable | Default | Notes |
 |---|---|---|
@@ -90,6 +167,7 @@ Set these as environment variables before starting if you want to change them:
 | `CACHE_TTL` | `60` | Seconds before re-fetching a symbol |
 | `PORT` | `8000` | |
 | `DB_PATH` | next to `app.py` | Point at a mounted volume when hosting |
+| `MAX_PROFILES` / `MAX_STOCKS` | `10` / `30` | Starting caps only — the Settings page wins once saved |
 
 Yahoo restricts how far back intraday data goes — roughly 7 days for 1-minute
 bars and 60 days for other intraday intervals. Worth confirming, since Yahoo
@@ -124,8 +202,30 @@ git commit -m "what changed"
 git push
 ```
 
-Add a `.gitignore` containing `venv/`, `__pycache__/` and `*.db` so you don't
-commit your environment or your database.
+### Back up your database before your next pull
+
+`stock_monitor.db` used to be committed to this repo and is now deliberately
+untracked (it holds your watchlists, your signal history and your Telegram bot
+token — none of which belong on GitHub). Because git had been tracking it,
+**pulling the commit that untracks it will delete your local copy.** Take a copy
+first:
+
+```powershell
+cd C:\Users\1234\Documents\GitHub\stockanalysis
+copy stock_monitor.db stock_monitor_backup.db
+git pull
+copy stock_monitor_backup.db stock_monitor.db
+```
+
+If you pull before reading this, the file is still in git history and can be
+brought back:
+
+```powershell
+git show 413b1c6:stock_monitor.db > stock_monitor.db
+```
+
+From now on `.gitignore` keeps the database, `venv/`, `__pycache__/` and `*.zip`
+out of every commit.
 
 ---
 
@@ -159,10 +259,14 @@ Two things to know before you rely on it:
   yfinance breaks whenever Yahoo changes something. Failures show up per-stock on
   the card rather than taking down the whole page. If everything fails at once,
   run `pip install -U yfinance` first.
-- **No alerts yet.** Mobile push needs either a browser tab left open or a
-  server-side scheduler; Telegram is the easy version of this (see below).
-- **No authentication.** Anyone with the URL sees and edits every profile. Fine
-  for you and one friend on a URL you don't publish; not fine beyond that.
+- **Alerts depend on the server staying up.** The checker runs inside `app.py`,
+  so alerts arrive only while the app is running — on a free host that sleeps
+  when idle, that means not reliably. A machine that stays on, or a paid host,
+  is what makes them dependable.
+- **No authentication.** Anyone with the URL sees and edits every watchlist, can
+  change the caps, and can read the Settings page — which is why the bot token is
+  only ever shown as its last four characters. Fine for you and one friend on a
+  URL you don't publish; not fine beyond that.
 - **The signal is arithmetic on past prices.** It has no view on what a stock
   will do next, and a 3/3 score is not a strong claim about the future. Paper
   trade it for a few weeks and check the history before risking money.
@@ -171,11 +275,15 @@ Two things to know before you rely on it:
 
 ## Sensible next steps
 
-1. **Telegram alerts** — a bot token, a background loop, and a message when a
-   stock's signal changes. Roughly 40 lines, no app store, works on both phones.
-   Best value of anything on this list.
-2. **Signal history view** — the `signal_log` table already records every score.
-   Surfacing "how often did BUY signals actually go up" is what tells you whether
-   any of this is worth trading.
-3. **Broker feed** for real-time prices.
-4. **Login** so you and your friend have separate, private profiles.
+1. **Broker feed** (Zerodha Kite, Angel One, Dhan) for genuinely live prices.
+   Only `analyse()` needs to change — everything downstream of it is
+   source-agnostic.
+2. **Login** so you and your friend have separate, private watchlists, and the
+   Settings page isn't open to whoever has the URL.
+3. **Exchange holiday calendar**, so the checker doesn't bother polling on days
+   the market never opened.
+4. **Alert thresholds** — e.g. only message on BUY/SELL, never on HOLD, or only
+   above a score you choose.
+
+Done since the first build: Telegram alerts, the history and hit-rate view,
+configurable caps, and auto-refresh.

@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#101219">
 <title>Pivot Desk</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%23101219'/><path d='M4 22h24' stroke='%23C9A24C' stroke-width='2'/><path d='M8 18l6-7 5 5 5-8' fill='none' stroke='%2339A96B' stroke-width='3'/></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
@@ -148,6 +149,54 @@ main{padding:16px;max-width:1100px;margin:0 auto}
 .stats b{color:var(--muted);font-weight:500}
 .foot{margin-top:9px;font-family:var(--mono);font-size:10px;color:var(--dim)}
 
+/* ---------- view switch ---------- */
+.views{display:flex;gap:2px;margin-left:auto}
+.views button{font-family:var(--mono);font-size:11px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--dim);padding:5px 9px;border:1px solid transparent}
+.views button:hover{color:var(--paper)}
+.views button[aria-current="true"]{color:var(--brass);border-color:var(--brass-dim)}
+
+/* ---------- panel (settings / history) ---------- */
+.panel{background:var(--panel);border:1px solid var(--rule);padding:16px;margin-bottom:16px}
+.panel h2{font-family:var(--cond);font-size:19px;font-weight:700;letter-spacing:.06em;
+  text-transform:uppercase;margin-bottom:4px}
+.panel h3{font-family:var(--mono);font-size:11px;color:var(--brass);letter-spacing:.12em;
+  text-transform:uppercase;margin:20px 0 10px;padding-top:14px;border-top:1px solid var(--rule)}
+.panel h3:first-of-type{margin-top:14px}
+.lede{font-size:13px;color:var(--muted);margin-bottom:6px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.row label{font-size:13px;color:var(--muted);min-width:150px}
+.row input[type=text],.row input[type=password],.row input[type=number]{
+  background:var(--ink);border:1px solid var(--rule);color:var(--paper);
+  padding:8px 11px;border-radius:2px;font-family:var(--mono);font-size:13px;
+  flex:1;min-width:160px}
+.row input[type=number]{flex:none;width:90px}
+.row .hint{font-family:var(--mono);font-size:11px;color:var(--dim);flex-basis:100%}
+.check{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);
+  cursor:pointer;min-width:auto}
+.check input{width:15px;height:15px;accent-color:var(--brass)}
+.status{font-family:var(--mono);font-size:11px;color:var(--dim);line-height:1.8;
+  border-top:1px solid var(--rule);margin-top:14px;padding-top:12px}
+.status .ok{color:var(--up)} .status .bad{color:var(--down)}
+
+/* ---------- history table ---------- */
+.cards{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px}
+.stat{border:1px solid var(--rule);background:var(--panel-2);padding:10px 14px;min-width:130px}
+.stat b{display:block;font-family:var(--mono);font-size:21px;font-weight:600}
+.stat span{font-family:var(--mono);font-size:10px;color:var(--dim);letter-spacing:.1em;
+  text-transform:uppercase}
+.tblwrap{overflow-x:auto;border:1px solid var(--rule)}
+table{border-collapse:collapse;width:100%;font-family:var(--mono);font-size:12px;
+  min-width:560px}
+th{text-align:left;font-size:10px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--dim);font-weight:500;padding:9px 12px;background:var(--panel-2);
+  border-bottom:1px solid var(--rule);white-space:nowrap}
+td{padding:9px 12px;border-bottom:1px solid var(--rule);white-space:nowrap}
+tr:last-child td{border-bottom:none}
+td.sig b{font-weight:600}
+td.sig .BUY{color:var(--up)} td.sig .SELL{color:var(--down)} td.sig .HOLD{color:var(--muted)}
+.open{color:var(--dim)}
+
 /* ---------- states ---------- */
 .empty{border:1px dashed var(--rule);padding:38px 20px;text-align:center;
   color:var(--muted)}
@@ -167,6 +216,11 @@ main{padding:16px;max-width:1100px;margin:0 auto}
 <header>
   <h1>Pivot<span class="tick">·</span>Desk</h1>
   <span class="tagline">CAMARILLA / MA / VWAP &nbsp;—&nbsp; NSE &amp; BSE</span>
+  <nav class="views" id="views">
+    <button data-view="signals" aria-current="true" onclick="go('signals')">Signals</button>
+    <button data-view="history" onclick="go('history')">History</button>
+    <button data-view="settings" onclick="go('settings')">Settings</button>
+  </nav>
   <span class="clock" id="clock"></span>
 </header>
 
@@ -184,9 +238,17 @@ main{padding:16px;max-width:1100px;margin:0 auto}
 <script>
 const $ = s => document.querySelector(s);
 let profiles = [], active = null, stocks = [], limit = 30, starter = [], busy = false;
+let view = 'signals', lastData = null, settings = null, hist = null, caps = {};
+let autoOn = localStorage.getItem('auto') === '1';
+let autoSecs = +(localStorage.getItem('autoSecs') || 60);
+let autoTimer = null;
 
 const money = n => n == null ? '—' : '₹' + n.toLocaleString('en-IN',
   {minimumFractionDigits:2, maximumFractionDigits:2});
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const stamp = t => !t ? '—' : new Date(t).toLocaleString('en-IN',
+  {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit'});
 
 function toast(msg){
   const t = document.createElement('div');
@@ -207,9 +269,21 @@ function tickClock(){
 }
 setInterval(tickClock, 1000); tickClock();
 
-/* ---------------- profiles ---------------- */
+/* ---------------- view switch ---------------- */
+function go(v){
+  view = v;
+  document.querySelectorAll('#views button').forEach(b =>
+    b.setAttribute('aria-current', b.dataset.view === v));
+  if(v === 'history' && active) return loadHistory();
+  if(v === 'settings') return loadSettings();
+  render(lastData);
+}
+
+/* ---------------- profiles / watchlists ---------------- */
 async function loadProfiles(){
-  profiles = (await api('/api/profiles')).profiles;
+  const d = await api('/api/profiles');
+  profiles = d.profiles;
+  caps = {max_profiles: d.max_profiles, max_stocks_per_profile: d.max_stocks_per_profile};
   if(!active || !profiles.some(p => p.id === active)) active = profiles[0]?.id ?? null;
   drawRail();
   if(active) await loadStocks(); else render();
@@ -226,14 +300,16 @@ function drawRail(){
     b.onclick = () => { active = p.id; drawRail(); loadStocks(); };
     rail.appendChild(b);
   });
-  const add = document.createElement('button');
-  add.className = 'chip add'; add.textContent = '+ Profile';
-  add.onclick = newProfile;
-  rail.appendChild(add);
+  if(profiles.length < (caps.max_profiles ?? 10)){
+    const add = document.createElement('button');
+    add.className = 'chip add'; add.textContent = '+ Watchlist';
+    add.onclick = newProfile;
+    rail.appendChild(add);
+  }
 }
 
 async function newProfile(){
-  const name = prompt('Name this profile (e.g. Intraday, Swing, Ravi):');
+  const name = prompt('Name this watchlist (e.g. Intraday, Swing, Ravi):');
   if(!name) return;
   try{
     const p = await api('/api/profiles', {method:'POST', body:JSON.stringify({name})});
@@ -243,9 +319,9 @@ async function newProfile(){
 
 async function delProfile(){
   const p = profiles.find(x => x.id === active);
-  if(!p || !confirm(`Delete "${p.name}" and its watchlist?`)) return;
+  if(!p || !confirm(`Delete "${p.name}", its stocks and its signal history?`)) return;
   await api('/api/profiles/' + active, {method:'DELETE'});
-  active = null; await loadProfiles();
+  active = null; lastData = null; hist = null; await loadProfiles();
 }
 
 /* ---------------- watchlist ---------------- */
@@ -253,7 +329,7 @@ async function loadStocks(){
   const d = await api(`/api/profiles/${active}/stocks`);
   stocks = d.stocks; limit = d.limit;
   if(!starter.length) starter = (await api('/api/symbols')).symbols;
-  render();
+  render(lastData);
 }
 
 async function addStock(sym, exch){
@@ -270,14 +346,38 @@ async function dropStock(sym, exch){
 }
 
 /* ---------------- signals ---------------- */
-async function refresh(){
-  if(busy || !stocks.length) return;
-  busy = true; render();
+async function refresh(quiet){
+  if(busy || !stocks.length || !active) return;
+  busy = true; if(!quiet) render(lastData);
   try{
-    const d = await api(`/api/profiles/${active}/signals`);
-    render(d);
-  }catch(e){ toast(e.message); render(); }
-  finally{ busy = false; }
+    lastData = await api(`/api/profiles/${active}/signals`);
+    if(lastData.changes?.length && quiet)
+      toast(lastData.changes.map(c => `${c.symbol} ${c.previous || 'new'} → ${c.signal}`)
+        .join(' · '));
+    busy = false; render(lastData);
+  }catch(e){ busy = false; toast(e.message); render(lastData); }
+}
+
+/* ---------------- auto-refresh ---------------- */
+function scheduleAuto(){
+  clearInterval(autoTimer); autoTimer = null;
+  if(!autoOn) return;
+  autoTimer = setInterval(() => {
+    // Don't hammer Yahoo for a tab nobody is looking at.
+    if(document.hidden || view !== 'signals' || busy) return;
+    refresh(true);
+  }, autoSecs * 1000);
+}
+
+function setAuto(on){
+  autoOn = on; localStorage.setItem('auto', on ? '1' : '0');
+  scheduleAuto(); render(lastData);
+  if(on) refresh(true);
+}
+
+function setAutoSecs(v){
+  autoSecs = +v; localStorage.setItem('autoSecs', autoSecs);
+  scheduleAuto(); render(lastData);
 }
 
 /* ---------------- the ladder ---------------- */
@@ -304,8 +404,8 @@ function ladder(s){
 
 function card(s){
   if(s.error) return `<article class="card err"><div class="head">
-      <div class="sym">${s.symbol}<small>${s.exchange}</small></div></div>
-      <p class="foot">Could not load: ${s.error}</p></article>`;
+      <div class="sym">${esc(s.symbol)}<small>${esc(s.exchange)}</small></div></div>
+      <p class="foot">Could not load: ${esc(s.error)}</p></article>`;
   const dir = s.change_pct >= 0 ? 'up' : 'down';
   const cls = s.signal.toLowerCase();
   const width = Math.abs(s.score) / 3 * 50;
@@ -313,11 +413,11 @@ function card(s){
   const why = s.reasons.map(r => {
     const t = r.weight > 0 ? 'p' : r.weight < 0 ? 'n' : 'z';
     const sign = r.weight > 0 ? '+' : '';
-    return `<div class="${t}"><em>${sign}${r.weight}</em><span>${r.text}</span></div>`;
+    return `<div class="${t}"><em>${sign}${r.weight}</em><span>${esc(r.text)}</span></div>`;
   }).join('');
   return `<article class="card ${cls}">
     <div class="head">
-      <div class="sym">${s.symbol}<small>${s.exchange}</small></div>
+      <div class="sym">${esc(s.symbol)}<small>${esc(s.exchange)}</small></div>
       <div class="px">
         <div class="v">${money(s.price)}</div>
         <div class="d ${dir}">${s.change_pct >= 0 ? '▲' : '▼'} ${Math.abs(s.change_pct).toFixed(2)}%</div>
@@ -340,19 +440,216 @@ function card(s){
   </article>`;
 }
 
+/* ---------------- history ---------------- */
+async function loadHistory(){
+  try{ hist = await api(`/api/profiles/${active}/history`); }
+  catch(e){ toast(e.message); hist = null; }
+  render(lastData);
+}
+
+async function clearHistory(){
+  if(!confirm('Delete the recorded signal history for this watchlist?')) return;
+  await api(`/api/profiles/${active}/history`, {method:'DELETE'});
+  loadHistory();
+}
+
+function renderHistory(){
+  const prof = profiles.find(p => p.id === active) || {};
+  if(!hist) return '<div class="empty"><p>Loading history…</p></div>';
+  const s = hist.summary;
+  const rate = k => s[k].pct == null ? '—' : s[k].pct + '%';
+  const rows = hist.history.map(r => {
+    const open = r.exit_at == null;
+    const mv = r.move_pct;
+    const cls = mv == null ? '' : mv >= 0 ? 'up' : 'down';
+    return `<tr>
+      <td>${stamp(r.logged_at)}</td>
+      <td>${esc(r.symbol)}</td>
+      <td class="sig"><b class="${r.signal}">${r.signal}</b></td>
+      <td>${r.score > 0 ? '+' : ''}${r.score}</td>
+      <td>${money(r.price)}</td>
+      <td>${open ? '<span class="open">still open</span>' : money(r.exit_price)}</td>
+      <td class="${cls}">${mv == null ? '—' : (mv >= 0 ? '+' : '') + mv.toFixed(2) + '%'}</td>
+      <td>${r.hit == null ? '<span class="open">—</span>'
+            : r.hit ? '<span class="up">hit</span>' : '<span class="down">miss</span>'}</td>
+    </tr>`;
+  }).join('');
+
+  return `<section class="panel">
+      <h2>History — ${esc(prof.name || '')}</h2>
+      <p class="lede">Every time this watchlist's score changed a stock's signal, and
+        where the price stood when that signal was replaced.</p>
+      <div class="cards" style="margin-top:14px">
+        <div class="stat"><b class="up">${rate('buy')}</b>
+          <span>BUY moved up</span></div>
+        <div class="stat"><b class="down">${rate('sell')}</b>
+          <span>SELL moved down</span></div>
+        <div class="stat"><b>${s.buy.resolved + s.sell.resolved}</b>
+          <span>closed signals</span></div>
+        <div class="stat"><b>${hist.total}</b><span>changes logged</span></div>
+      </div>
+      <p class="lede">Counted on delayed Yahoo prices, entry and exit at the bar close,
+        with no brokerage, taxes or slippage. HOLD is not scored. A small sample here
+        means nothing either way — this tells you what the score did, not what it will do.</p>
+    </section>
+    ${hist.history.length ? `<div class="tblwrap"><table>
+      <thead><tr><th>When</th><th>Symbol</th><th>Signal</th><th>Score</th>
+        <th>Price</th><th>At next change</th><th>Move</th><th>Result</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+      <div class="bar" style="margin-top:14px">
+        <button class="btn ghost" onclick="clearHistory()">Clear history</button></div>`
+    : `<div class="empty"><p>No signal changes recorded yet. Run signals a few times —
+        a row is written only when a stock's signal actually changes.</p></div>`}`;
+}
+
+/* ---------------- settings / admin ---------------- */
+async function loadSettings(){
+  try{ settings = await api('/api/settings'); }
+  catch(e){ toast(e.message); settings = null; }
+  render(lastData);
+}
+
+async function saveSettings(patch){
+  try{
+    settings = await api('/api/settings', {method:'POST', body:JSON.stringify(patch)});
+    await loadProfiles();
+    render(lastData);
+    toast('Saved.');
+  }catch(e){ toast(e.message); }
+}
+
+function saveTelegram(){
+  saveSettings({
+    telegram_token: $('#tgToken').value.trim(),
+    telegram_chat_ids: $('#tgChats').value.trim(),
+    alert_interval_minutes: +$('#tgEvery').value,
+  });
+  $('#tgToken').value = '';
+}
+
+function saveCaps(){
+  saveSettings({
+    max_profiles: +$('#capLists').value,
+    max_stocks_per_profile: +$('#capStocks').value,
+  });
+}
+
+async function testTelegram(){
+  try{ const r = await api('/api/telegram/test', {method:'POST'});
+       toast(`Test message sent to ${r.sent} chat(s).`); }
+  catch(e){ toast(e.message); }
+}
+
+async function sweepNow(){
+  toast('Scoring every alert-enabled watchlist…');
+  try{ const r = await api('/api/alerts/run', {method:'POST'});
+       toast(`${r.changes} signal change(s), ${r.sent} message(s) sent.`
+             + (r.errors.length ? ' Errors: ' + r.errors.join('; ') : ''));
+       loadSettings(); }
+  catch(e){ toast(e.message); }
+}
+
+async function toggleProfileAlerts(id, on){
+  await api(`/api/profiles/${id}/alerts`, {method:'POST', body:JSON.stringify({alerts:on})});
+  await loadProfiles(); loadSettings();
+}
+
+function renderSettings(){
+  if(!settings) return '<div class="empty"><p>Loading settings…</p></div>';
+  const s = settings, L = s.loop || {};
+  const perList = profiles.map(p => `<label class="check">
+      <input type="checkbox" ${p.alerts ? 'checked' : ''}
+        onchange="toggleProfileAlerts(${p.id}, this.checked)"> ${esc(p.name)}</label>`)
+    .join('') || '<span class="hint">No watchlists yet.</span>';
+
+  return `<section class="panel">
+    <h2>Settings</h2>
+    <p class="lede">Everything here is stored in the database on this machine.
+      There is no login — anyone who can open this page can change it.</p>
+
+    <h3>Telegram alerts</h3>
+    <p class="lede">Message @BotFather on Telegram, send <b>/newbot</b>, and paste the
+      token it gives you below. Then message your new bot once from each phone that
+      should get alerts, and put the chat IDs in the second box — open
+      <span style="font-family:var(--mono)">api.telegram.org/bot&lt;token&gt;/getUpdates</span>
+      in a browser to read them off.</p>
+    <div class="row">
+      <label for="tgToken">Bot token</label>
+      <input type="password" id="tgToken" autocomplete="off"
+        placeholder="${s.telegram_configured ? 'Saved (' + esc(s.telegram_token_hint) + ') — type to replace' : '123456:AAE…'}">
+    </div>
+    <div class="row">
+      <label for="tgChats">Chat IDs</label>
+      <input type="text" id="tgChats" value="${esc(s.telegram_chat_ids)}"
+        placeholder="e.g. 12345678, 87654321">
+      <span class="hint">Comma-separated. One per phone.</span>
+    </div>
+    <div class="row">
+      <label for="tgEvery">Check every</label>
+      <input type="number" id="tgEvery" min="1" max="180" value="${s.alert_interval_minutes}">
+      <span style="font-size:13px;color:var(--muted)">minutes</span>
+    </div>
+    <div class="row">
+      <label class="check"><input type="checkbox" ${s.alerts_enabled ? 'checked' : ''}
+        onchange="saveSettings({alerts_enabled:this.checked})"> Alerts on</label>
+      <label class="check"><input type="checkbox" ${s.market_hours_only ? 'checked' : ''}
+        onchange="saveSettings({market_hours_only:this.checked})">
+        Only during market hours (09:15–15:30 IST, Mon–Fri)</label>
+    </div>
+    <div class="row">
+      <button class="btn solid" onclick="saveTelegram()">Save</button>
+      <button class="btn" onclick="testTelegram()">Send test message</button>
+      <button class="btn" onclick="sweepNow()">Check now</button>
+      ${s.telegram_configured ? `<button class="btn ghost"
+        onclick="if(confirm('Forget the bot token and chat IDs?'))
+          api('/api/settings/telegram',{method:'DELETE'}).then(loadSettings)">Disconnect</button>` : ''}
+    </div>
+    <p class="lede">You are alerted only when a stock's signal <em>changes</em> — a stock
+      sitting on BUY does not message you every few minutes. A symbol seen for the first
+      time is recorded quietly, with no message.</p>
+
+    <h3>Alert these watchlists</h3>
+    <div class="row">${perList}</div>
+
+    <h3>Caps</h3>
+    <div class="row">
+      <label for="capLists">Watchlists</label>
+      <input type="number" id="capLists" min="1" max="500" value="${s.max_profiles}">
+      <span class="hint">You have ${profiles.length}.</span>
+    </div>
+    <div class="row">
+      <label for="capStocks">Stocks per watchlist</label>
+      <input type="number" id="capStocks" min="1" max="500" value="${s.max_stocks_per_profile}">
+      <span class="hint">Raising this makes every refresh slower and makes Yahoo more
+        likely to rate-limit you — 30 per list is a comfortable ceiling.</span>
+    </div>
+    <div class="row"><button class="btn solid" onclick="saveCaps()">Save caps</button></div>
+
+    <div class="status">
+      Background checker: <span class="${L.running ? 'ok' : 'bad'}">${L.running ? 'running' : 'stopped'}</span>
+        · market ${s.market_open_now ? '<span class="ok">open</span>' : 'closed'}<br>
+      Last check: ${L.last_run ? stamp(L.last_run) : 'not yet'} ·
+      Last message sent: ${L.last_sent ? stamp(L.last_sent) : 'none'}<br>
+      ${L.last_error ? `<span class="bad">Last error: ${esc(L.last_error)}</span>` : 'No errors.'}
+    </div>
+  </section>`;
+}
+
 /* ---------------- render ---------------- */
 function render(data){
   const el = $('#body');
+  if(active && view === 'history'){ el.innerHTML = renderHistory(); return; }
+  if(view === 'settings'){ el.innerHTML = renderSettings(); return; }
   if(!active){
-    el.innerHTML = `<div class="empty"><p>No profiles yet. Each profile keeps its
-      own watchlist of up to 30 stocks.</p>
-      <button class="btn solid" onclick="newProfile()">Create a profile</button></div>`;
+    el.innerHTML = `<div class="empty"><p>No watchlists yet. Each one holds its own
+      set of stocks, scored independently.</p>
+      <button class="btn solid" onclick="newProfile()">Create a watchlist</button></div>`;
     return;
   }
   const prof = profiles.find(p => p.id === active) || {};
-  const held = stocks.map(s => `<span class="held">${s.symbol}<small>${s.exchange}</small>
-      <button onclick="dropStock('${s.symbol}','${s.exchange}')"
-        aria-label="Remove ${s.symbol}">×</button></span>`).join('') ||
+  const held = stocks.map(s => `<span class="held">${esc(s.symbol)}<small>${esc(s.exchange)}</small>
+      <button onclick="dropStock('${esc(s.symbol)}','${esc(s.exchange)}')"
+        aria-label="Remove ${esc(s.symbol)}">×</button></span>`).join('') ||
     '<span class="foot">Nothing on this watchlist yet.</span>';
   const picks = starter.filter(s => !stocks.some(x => x.symbol === s)).slice(0, 18)
     .map(s => `<button onclick="addStock('${s}','NSE')">${s}</button>`).join('');
@@ -375,13 +672,22 @@ function render(data){
     </section>
 
     <div class="bar">
-      <span class="eyebrow">${prof.name} · ${stocks.length}/${limit} tracked</span>
+      <span class="eyebrow">${esc(prof.name)} · ${stocks.length}/${limit} tracked</span>
       ${counts}
       <span class="spacer"></span>
-      <button class="btn ghost" onclick="delProfile()">Delete profile</button>
+      <label class="check" title="Re-runs signals on a timer while this tab is open">
+        <input type="checkbox" ${autoOn ? 'checked' : ''} onchange="setAuto(this.checked)">
+        Auto</label>
+      <select class="btn" onchange="setAutoSecs(this.value)" ${autoOn ? '' : 'disabled'}>
+        ${[30,60,120,300].map(v => `<option value="${v}" ${v === autoSecs ? 'selected' : ''}>
+          ${v < 60 ? v + 's' : (v/60) + 'm'}</option>`).join('')}
+      </select>
+      <button class="btn ghost" onclick="delProfile()">Delete watchlist</button>
       <button class="btn solid" onclick="refresh()" ${busy || !stocks.length ? 'disabled' : ''}>
         ${busy ? 'Reading the tape…' : 'Run signals'}</button>
     </div>
+    ${data ? `<p class="foot" style="margin:-8px 0 12px">Last run ${stamp(data.generated_at)}${
+      autoOn ? ` · refreshing every ${autoSecs < 60 ? autoSecs + 's' : autoSecs/60 + 'm'}` : ''}</p>` : ''}
 
     ${busy ? '<p class="eyebrow skel">Pulling quotes and recomputing levels…</p>' : ''}
     ${data ? `<div class="grid">${data.signals.map(card).join('')}</div>` :
@@ -392,12 +698,18 @@ function render(data){
 }
 
 function submitAdd(){
-  const v = $('#symIn').value.trim().toUpperCase();
+  const v = $('#symIn').value.trim().toUpperCase().replace(/[^A-Z0-9&.\-]/g, '');
   if(!v) return;
   addStock(v, $('#exIn').value);
   $('#symIn').value = '';
 }
 
+document.addEventListener('visibilitychange', () => {
+  // Catch up once on returning to the tab rather than waiting out the interval.
+  if(!document.hidden && autoOn && view === 'signals') refresh(true);
+});
+
+scheduleAuto();
 loadProfiles();
 </script>
 </body>
