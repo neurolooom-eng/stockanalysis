@@ -62,6 +62,15 @@ the README for the recovery command if a pull ever removes it.
   polls and the alert loop sweeps; logging every pass would bury the real
   transitions and make the hit rate meaningless. This is also what makes "alert
   on change" and "history" the same mechanism — `score_profile()` serves both.
+- **The breakout strategy is a separate mechanism from the score**, sharing only
+  `analyse()`. Owner's spec, from a handwritten note: scan for a narrow H3−L3
+  band, enter 0.1% above H3 *or* on a candle close above it, stop 0.3% below the
+  *level* (not below entry), target +1.5%, stepped trail `0.5:0,1.0:0.5,1.5:1.0`.
+  Owner explicitly chose the narrow-band definition, no broad-market filter, and
+  the stepped trail over the alternatives — don't quietly substitute others.
+- **It alerts, it never places orders.** No broker connection exists. The trade
+  rows are a journal of what the rules said, at delayed prices; say so plainly
+  rather than presenting them as fills or P&L.
 - **Caps are settings, not constants.** Watchlists (10) and stocks per watchlist
   (30) are rows in `settings`, editable from the Settings page, enforced
   server-side. The env vars are starting values only.

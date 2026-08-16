@@ -105,6 +105,37 @@ def init_db():
                 key         TEXT PRIMARY KEY,
                 value       TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS candidates (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol      TEXT NOT NULL,
+                exchange    TEXT NOT NULL,
+                band_pct    REAL NOT NULL,
+                level_name  TEXT NOT NULL,
+                level_price REAL NOT NULL,
+                price       REAL NOT NULL,
+                status      TEXT NOT NULL DEFAULT 'WATCHING',
+                scanned_at  TEXT NOT NULL,
+                UNIQUE(symbol, exchange, scanned_at)
+            );
+            CREATE TABLE IF NOT EXISTS trades (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol        TEXT NOT NULL,
+                exchange      TEXT NOT NULL,
+                level_name    TEXT NOT NULL,
+                level_price   REAL NOT NULL,
+                entry_price   REAL NOT NULL,
+                entry_at      TEXT NOT NULL,
+                entry_reason  TEXT NOT NULL,
+                stop_price    REAL NOT NULL,
+                target_price  REAL NOT NULL,
+                high_price    REAL NOT NULL,
+                trail_step    REAL NOT NULL DEFAULT -1,
+                status        TEXT NOT NULL DEFAULT 'OPEN',
+                exit_price    REAL,
+                exit_at       TEXT,
+                exit_reason   TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_trades_open ON trades(status, symbol);
             CREATE TABLE IF NOT EXISTS users (
                 username    TEXT PRIMARY KEY,
                 salt        TEXT NOT NULL,
@@ -134,6 +165,16 @@ SETTING_DEFAULTS = {
     # panel without touching code. These are the starting values only.
     "max_profiles": str(DEFAULT_MAX_PROFILES),
     "max_stocks_per_profile": str(DEFAULT_MAX_STOCKS),
+    # ---- breakout strategy (see STRATEGY section) ----
+    "strategy_enabled": "0",
+    "strategy_level": "h3",        # which Camarilla level is the trigger line
+    "band_max_pct": "1.5",         # H3-L3 width, as % of price, to count as contracted
+    "entry_buffer_pct": "0.1",     # trigger this far above the level
+    "entry_mode": "either",        # buffer | candle | either
+    "sl_pct": "0.3",               # stop this far BELOW the level
+    "target_pct": "1.5",           # book this far above entry
+    "trail_steps": "0.5:0,1.0:0.5,1.5:1.0",   # gain% : move stop to entry+this%
+    "scan_universe": "",           # blank = STARTER_SYMBOLS
 }
 
 
@@ -413,9 +454,14 @@ def analyse(symbol: str, exchange: str) -> Dict:
         prev = daily.iloc[-2]
         piv = camarilla(float(prev["High"]), float(prev["Low"]), float(prev["Close"]))
 
+        last_close = None
         if intra is not None and len(intra) >= 2:
             close = intra["Close"].dropna()
             price = float(close.iloc[-1])
+            # The bar behind the live one is the last COMPLETED bar. The
+            # strategy's "candle closed above the level" test needs that, not
+            # the bar still forming.
+            last_close = float(close.iloc[-2]) if len(close) >= 2 else None
             ma_fast = float(close.rolling(MA_FAST).mean().iloc[-1]) if len(close) >= MA_FAST else None
             ma_slow = float(close.rolling(MA_SLOW).mean().iloc[-1]) if len(close) >= MA_SLOW else None
             vwap = session_vwap(intra)
@@ -447,6 +493,8 @@ def analyse(symbol: str, exchange: str) -> Dict:
             "ma_fast_period": MA_FAST,
             "ma_slow_period": MA_SLOW,
             "vwap": round(vwap, 2) if vwap is not None else None,
+            "last_close": round(last_close, 2) if last_close is not None else None,
+            "band_pct": round(band_pct(piv, price), 2) if price else None,
             "pivots": {k: round(v, 2) for k, v in piv.items()},
             "as_of": as_of,
             "basis": basis,
@@ -566,6 +614,251 @@ def format_alert(profile_name: str, change: Dict) -> str:
     return "\n".join(lines)
 
 
+# ----------------------------------------------------------------------------
+# Breakout strategy
+#
+# Scan for Camarilla contraction, watch the candidates for a break above the
+# trigger level, then track stop, target and a stepped trailing stop until the
+# position closes. Every number below is a setting.
+#
+# This ALERTS. It does not place orders - there is no broker connection, and
+# Yahoo's data is delayed, so a fill at these prices is not something the app
+# can promise. Treat the trade rows as a journal of what the rules said.
+# ----------------------------------------------------------------------------
+
+def strategy_config() -> Dict:
+    cfg = get_settings()
+
+    def num(key, fallback):
+        try:
+            return float(cfg[key])
+        except (TypeError, ValueError, KeyError):
+            return fallback
+
+    steps = []
+    for chunk in (cfg.get("trail_steps") or "").split(","):
+        if ":" not in chunk:
+            continue
+        gain, stop_at = chunk.split(":", 1)
+        try:
+            steps.append((float(gain), float(stop_at)))
+        except ValueError:
+            continue
+    steps.sort()
+
+    level = cfg.get("strategy_level", "h3")
+    return {
+        "enabled": cfg.get("strategy_enabled") == "1",
+        "level": level if level in ("h3", "h4") else "h3",
+        "band_max_pct": num("band_max_pct", 1.5),
+        "entry_buffer_pct": num("entry_buffer_pct", 0.1),
+        "entry_mode": cfg.get("entry_mode", "either"),
+        "sl_pct": num("sl_pct", 0.3),
+        "target_pct": num("target_pct", 1.5),
+        "trail_steps": steps,
+        "universe": [s.strip().upper() for s in
+                     (cfg.get("scan_universe") or "").replace("\n", ",").split(",")
+                     if s.strip()] or list(STARTER_SYMBOLS),
+    }
+
+
+def band_pct(pivots: Dict[str, float], price: float) -> Optional[float]:
+    """Width of the H3-L3 band as a percentage of price. The narrower it is,
+    the more the stock has coiled up against yesterday's range."""
+    if not price:
+        return None
+    return (pivots["h3"] - pivots["l3"]) / price * 100
+
+
+def run_scan(exchange: str = "NSE") -> Dict:
+    """Score the universe and record today's contracted names as candidates."""
+    cfg = strategy_config()
+    universe = cfg["universe"]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda s: analyse(s, exchange), universe))
+
+    today = datetime.now(IST).date().isoformat()
+    found, failed = [], []
+    for r in results:
+        if "error" in r:
+            failed.append({"symbol": r["symbol"], "error": r["error"]})
+            continue
+        width = band_pct(r["pivots"], r["price"])
+        if width is None or width > cfg["band_max_pct"]:
+            continue
+        found.append({
+            "symbol": r["symbol"], "exchange": exchange,
+            "band_pct": round(width, 2),
+            "level_name": cfg["level"].upper(),
+            "level_price": r["pivots"][cfg["level"]],
+            "price": r["price"],
+        })
+
+    found.sort(key=lambda c: c["band_pct"])
+    with db() as conn:
+        for c in found:
+            conn.execute(
+                "INSERT OR IGNORE INTO candidates"
+                " (symbol, exchange, band_pct, level_name, level_price, price,"
+                "  status, scanned_at) VALUES (?,?,?,?,?,?, 'WATCHING', ?)",
+                (c["symbol"], c["exchange"], c["band_pct"], c["level_name"],
+                 c["level_price"], c["price"], today))
+    return {"scanned": len(universe), "candidates": found,
+            "failed": failed, "scanned_at": today}
+
+
+def open_trade(cand: Dict, quote: Dict, reason: str, cfg: Dict) -> Dict:
+    level = cand["level_price"]
+    price = quote["price"]
+    trade = {
+        "symbol": cand["symbol"], "exchange": cand["exchange"],
+        "level_name": cand["level_name"], "level_price": level,
+        "entry_price": price, "entry_at": datetime.now(IST).isoformat(),
+        "entry_reason": reason,
+        "stop_price": round(level * (1 - cfg["sl_pct"] / 100), 2),
+        "target_price": round(price * (1 + cfg["target_pct"] / 100), 2),
+        "high_price": price,
+    }
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO trades (symbol, exchange, level_name, level_price,"
+            " entry_price, entry_at, entry_reason, stop_price, target_price,"
+            " high_price) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            tuple(trade[k] for k in ("symbol", "exchange", "level_name",
+                                     "level_price", "entry_price", "entry_at",
+                                     "entry_reason", "stop_price", "target_price",
+                                     "high_price")))
+        conn.execute("UPDATE candidates SET status='ENTERED'"
+                     " WHERE symbol=? AND exchange=? AND status='WATCHING'",
+                     (cand["symbol"], cand["exchange"]))
+    trade["id"] = cur.lastrowid
+    return trade
+
+
+def manage_trade(trade: Dict, price: float, cfg: Dict) -> List[Dict]:
+    """Update high water mark, step the stop up, and close on stop or target.
+    Returns the events worth messaging about."""
+    events: List[Dict] = []
+    high = max(trade["high_price"], price)
+    stop = trade["stop_price"]
+    step = trade["trail_step"]
+    entry = trade["entry_price"]
+
+    gain_pct = (high - entry) / entry * 100 if entry else 0
+    for gain_at, stop_at in cfg["trail_steps"]:
+        if gain_pct >= gain_at > step:
+            new_stop = round(entry * (1 + stop_at / 100), 2)
+            if new_stop > stop:
+                stop, step = new_stop, gain_at
+                events.append({"kind": "TRAIL", "trade": trade, "price": price,
+                               "stop": stop, "note": f"+{gain_at:g}% reached"})
+
+    status, exit_reason = trade["status"], None
+    if price <= stop:
+        status, exit_reason = "STOPPED", "Stop hit"
+    elif price >= trade["target_price"]:
+        status, exit_reason = "TARGET", "Target hit"
+
+    with db() as conn:
+        if exit_reason:
+            conn.execute(
+                "UPDATE trades SET high_price=?, stop_price=?, trail_step=?,"
+                " status=?, exit_price=?, exit_at=?, exit_reason=? WHERE id=?",
+                (high, stop, step, status, price, datetime.now(IST).isoformat(),
+                 exit_reason, trade["id"]))
+            events.append({"kind": status, "trade": trade, "price": price,
+                           "stop": stop, "note": exit_reason})
+        else:
+            conn.execute(
+                "UPDATE trades SET high_price=?, stop_price=?, trail_step=? WHERE id=?",
+                (high, stop, step, trade["id"]))
+    return events
+
+
+def format_strategy_alert(event: Dict) -> str:
+    t, price = event["trade"], event["price"]
+    entry = t["entry_price"]
+    move = (price - entry) / entry * 100 if entry else 0
+    head = {
+        "ENTRY": f"▲ ENTRY  {t['symbol']} ({t['exchange']})",
+        "TRAIL": f"↗ TRAIL  {t['symbol']} ({t['exchange']})",
+        "TARGET": f"★ TARGET {t['symbol']} ({t['exchange']})",
+        "STOPPED": f"✖ STOP   {t['symbol']} ({t['exchange']})",
+    }.get(event["kind"], t["symbol"])
+    lines = [head, f"₹{price:,.2f}   {move:+.2f}% from entry ₹{entry:,.2f}"]
+    if event["kind"] == "ENTRY":
+        lines.append(f"{t['level_name']} ₹{t['level_price']:,.2f} · {event['note']}")
+        lines.append(f"Stop ₹{t['stop_price']:,.2f}   Target ₹{t['target_price']:,.2f}")
+    else:
+        lines.append(f"{event['note']} · stop now ₹{event['stop']:,.2f}")
+    lines.append("Delayed Yahoo data, no order placed. Not advice.")
+    return "\n".join(lines)
+
+
+def run_strategy_sweep() -> Dict:
+    """Check today's candidates for entry triggers, then manage anything open."""
+    cfg = strategy_config()
+    today = datetime.now(IST).date().isoformat()
+    with db() as conn:
+        cands = [dict(r) for r in conn.execute(
+            "SELECT * FROM candidates WHERE scanned_at=? AND status='WATCHING'",
+            (today,)).fetchall()]
+        open_rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM trades WHERE status='OPEN'").fetchall()]
+
+    symbols = {(c["symbol"], c["exchange"]) for c in cands}
+    symbols |= {(t["symbol"], t["exchange"]) for t in open_rows}
+    quotes: Dict[tuple, Dict] = {}
+    if symbols:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for q in pool.map(lambda s: analyse(s[0], s[1]), symbols):
+                quotes[(q["symbol"], q["exchange"])] = q
+
+    events: List[Dict] = []
+
+    for cand in cands:
+        q = quotes.get((cand["symbol"], cand["exchange"]))
+        if not q or "error" in q:
+            continue
+        level = cand["level_price"]
+        trigger = level * (1 + cfg["entry_buffer_pct"] / 100)
+        by_buffer = q["price"] >= trigger
+        # The last COMPLETED bar, not the one still forming.
+        by_candle = q.get("last_close") is not None and q["last_close"] > level
+        mode = cfg["entry_mode"]
+        hit = (by_buffer if mode == "buffer" else
+               by_candle if mode == "candle" else (by_buffer or by_candle))
+        if not hit:
+            continue
+        reason = (f"{cfg['entry_buffer_pct']:g}% above {cand['level_name']}"
+                  if by_buffer else
+                  f"{INTRADAY_INTERVAL} candle closed above {cand['level_name']}")
+        trade = open_trade(cand, q, reason, cfg)
+        events.append({"kind": "ENTRY", "trade": trade, "price": q["price"],
+                       "stop": trade["stop_price"], "note": reason})
+
+    for trade in open_rows:
+        q = quotes.get((trade["symbol"], trade["exchange"]))
+        if not q or "error" in q:
+            continue
+        events.extend(manage_trade(trade, q["price"], cfg))
+
+    sent, errors = 0, []
+    if events:
+        settings = get_settings()
+        token = settings["telegram_token"].strip()
+        chats = chat_id_list(settings["telegram_chat_ids"])
+        if token and chats:
+            for event in events:
+                out = send_telegram(token, chats, format_strategy_alert(event))
+                sent += out["sent"]
+                errors.extend(out["errors"])
+    return {"candidates": len(cands), "open": len(open_rows),
+            "events": [{"kind": e["kind"], "symbol": e["trade"]["symbol"],
+                        "price": e["price"], "note": e["note"]} for e in events],
+            "sent": sent, "errors": errors}
+
+
 def run_alert_sweep() -> Dict:
     """One pass over every alert-enabled profile. Blocking; called in a thread."""
     cfg = get_settings()
@@ -610,6 +903,8 @@ async def alert_loop():
             if ready and time.time() - last_sweep >= interval:
                 last_sweep = time.time()
                 await asyncio.to_thread(run_alert_sweep)
+                if strategy_config()["enabled"]:
+                    await asyncio.to_thread(run_strategy_sweep)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - the loop must survive anything
@@ -653,6 +948,15 @@ class SettingsIn(BaseModel):
     market_hours_only: Optional[bool] = None
     max_profiles: Optional[int] = None
     max_stocks_per_profile: Optional[int] = None
+    strategy_enabled: Optional[bool] = None
+    strategy_level: Optional[str] = None
+    band_max_pct: Optional[float] = None
+    entry_buffer_pct: Optional[float] = None
+    entry_mode: Optional[str] = None
+    sl_pct: Optional[float] = None
+    target_pct: Optional[float] = None
+    trail_steps: Optional[str] = None
+    scan_universe: Optional[str] = None
 
 
 class AlertsIn(BaseModel):
@@ -915,7 +1219,80 @@ def read_settings():
         **caps(),
         "market_open_now": market_is_open(),
         "loop": dict(_alert_state),
+        "strategy": {
+            "enabled": cfg["strategy_enabled"] == "1",
+            "strategy_level": cfg["strategy_level"],
+            "band_max_pct": float(cfg["band_max_pct"]),
+            "entry_buffer_pct": float(cfg["entry_buffer_pct"]),
+            "entry_mode": cfg["entry_mode"],
+            "sl_pct": float(cfg["sl_pct"]),
+            "target_pct": float(cfg["target_pct"]),
+            "trail_steps": cfg["trail_steps"],
+            "scan_universe": cfg["scan_universe"],
+            "universe_size": len(strategy_config()["universe"]),
+        },
     }
+
+
+# ------------------------------- strategy -----------------------------------
+
+@app.post("/api/strategy/scan")
+def strategy_scan(exchange: str = "NSE"):
+    return run_scan(exchange.upper())
+
+
+@app.post("/api/strategy/sweep")
+def strategy_sweep():
+    """Check candidates for triggers and manage open trades, now."""
+    return run_strategy_sweep()
+
+
+@app.get("/api/strategy")
+def strategy_state():
+    today = datetime.now(IST).date().isoformat()
+    with db() as conn:
+        cands = [dict(r) for r in conn.execute(
+            "SELECT * FROM candidates WHERE scanned_at=? ORDER BY band_pct",
+            (today,)).fetchall()]
+        open_rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM trades WHERE status='OPEN' ORDER BY id DESC").fetchall()]
+        closed = [dict(r) for r in conn.execute(
+            "SELECT * FROM trades WHERE status!='OPEN' ORDER BY id DESC LIMIT 100"
+        ).fetchall()]
+
+    wins = [t for t in closed if t["status"] == "TARGET"]
+    moves = [((t["exit_price"] - t["entry_price"]) / t["entry_price"] * 100)
+             for t in closed if t["entry_price"]]
+    return {
+        "scanned_at": today,
+        "candidates": cands,
+        "open": open_rows,
+        "closed": closed,
+        "summary": {
+            "closed": len(closed),
+            "targets": len(wins),
+            "stops": sum(1 for t in closed if t["status"] == "STOPPED"),
+            "hit_pct": round(len(wins) / len(closed) * 100, 1) if closed else None,
+            "avg_move_pct": round(sum(moves) / len(moves), 2) if moves else None,
+        },
+        "config": strategy_config(),
+    }
+
+
+@app.delete("/api/strategy/trades/{trade_id}")
+def close_trade(trade_id: int, price: Optional[float] = None):
+    """Close a trade by hand - you exited on your own judgement, or the alert
+    was stale."""
+    with db() as conn:
+        row = conn.execute("SELECT * FROM trades WHERE id=?", (trade_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Trade not found")
+        conn.execute(
+            "UPDATE trades SET status='CLOSED', exit_price=?, exit_at=?,"
+            " exit_reason='Closed by hand' WHERE id=?",
+            (price if price is not None else row["entry_price"],
+             datetime.now(IST).isoformat(), trade_id))
+    return {"closed": trade_id}
 
 
 @app.post("/api/settings")
@@ -938,6 +1315,23 @@ def write_settings(body: SettingsIn):
         updates["max_profiles"] = str(max(1, min(500, body.max_profiles)))
     if body.max_stocks_per_profile is not None:
         updates["max_stocks_per_profile"] = str(max(1, min(500, body.max_stocks_per_profile)))
+    if body.strategy_enabled is not None:
+        updates["strategy_enabled"] = "1" if body.strategy_enabled else "0"
+    if body.strategy_level is not None and body.strategy_level in ("h3", "h4"):
+        updates["strategy_level"] = body.strategy_level
+    if body.entry_mode is not None and body.entry_mode in ("buffer", "candle", "either"):
+        updates["entry_mode"] = body.entry_mode
+    for key, lo, hi in (("band_max_pct", 0.05, 25), ("entry_buffer_pct", 0, 5),
+                        ("sl_pct", 0.05, 25), ("target_pct", 0.1, 50)):
+        value = getattr(body, key)
+        if value is not None:
+            updates[key] = str(round(max(lo, min(hi, float(value))), 3))
+    if body.trail_steps is not None:
+        updates["trail_steps"] = body.trail_steps.strip()
+    if body.scan_universe is not None:
+        updates["scan_universe"] = ",".join(
+            s.strip().upper() for s in
+            body.scan_universe.replace("\n", ",").split(",") if s.strip())
     if updates:
         save_settings(updates)
     return read_settings()
