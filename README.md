@@ -147,6 +147,46 @@ saved.
 
 ---
 
+## Breakout strategy
+
+The **Strategy** view runs a rule set instead of a score: find coiled stocks,
+wait for the break, then manage the position.
+
+**It alerts. It does not place orders.** There is no broker connection — you get
+a Telegram message saying a level went, and you place the trade yourself.
+
+1. **Scan.** *Run scan* measures each symbol's Camarilla band — H3 minus L3 as a
+   percentage of price — and lists everything under your threshold (default
+   1.5%). A narrow band means the stock coiled up inside yesterday's range. The
+   levels come from the previous session, so the scan doesn't change during the
+   day; run it once before the open.
+2. **Entry.** A candidate triggers when price gets **0.1% above H3**, *or* when a
+   **5-minute candle closes above H3** — whichever happens first, configurable to
+   either test alone. The level (H3 or H4) is a setting.
+3. **Stop.** Placed **0.3% below the trigger level**, not below your entry, so the
+   stop sits where the breakout would be proved wrong.
+4. **Target.** **+1.5% above entry.**
+5. **Trailing stop, in steps.** Default `0.5:0, 1.0:0.5, 1.5:1.0` — read as "at
+   +0.5% move the stop to entry; at +1% move it to entry +0.5%; at +1.5% move it
+   to entry +1%". Edit the pairs to change the ladder.
+
+Every one of those numbers is a field in **Settings → Breakout strategy**,
+including the symbol list the scan runs over. Each symbol is one Yahoo request
+per scan, so a list of hundreds will be slow and may get rate-limited.
+
+Alerts fire on entry, on each trail step, and on target or stop. The Strategy
+view keeps the open positions and a journal of closed ones, with how far each
+moved.
+
+**What the journal is not.** Entries are recorded at the price the app saw when
+it noticed the trigger — on data delayed by roughly 15 minutes, through a poll
+that runs every few minutes. Your fills will differ, and with a 0.1% trigger and
+a 0.3% stop that difference is larger than the edge being measured. Until there
+is a broker feed, treat this as a record of what the rules said, not what you
+would have made.
+
+---
+
 ## History and hit rate
 
 **History** lists every time a stock's signal changed on that watchlist, and what

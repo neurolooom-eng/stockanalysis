@@ -239,6 +239,7 @@ td.sig .BUY{color:var(--up)} td.sig .SELL{color:var(--down)} td.sig .HOLD{color:
   <span class="tagline">CAMARILLA / MA / VWAP &nbsp;—&nbsp; NSE &amp; BSE</span>
   <nav class="views" id="views">
     <button data-view="signals" aria-current="true" onclick="go('signals')">Signals</button>
+    <button data-view="strategy" onclick="go('strategy')">Strategy</button>
     <button data-view="history" onclick="go('history')">History</button>
     <button data-view="settings" onclick="go('settings')">Settings</button>
   </nav>
@@ -272,6 +273,7 @@ td.sig .BUY{color:var(--up)} td.sig .SELL{color:var(--down)} td.sig .HOLD{color:
 const $ = s => document.querySelector(s);
 let profiles = [], active = null, stocks = [], limit = 30, starter = [], busy = false;
 let view = 'signals', lastData = null, settings = null, hist = null, caps = {}, me = null;
+let strat = null;
 let autoOn = localStorage.getItem('auto') === '1';
 let autoSecs = +(localStorage.getItem('autoSecs') || 60);
 let autoTimer = null;
@@ -344,6 +346,7 @@ function go(v){
     b.setAttribute('aria-current', b.dataset.view === v));
   if(v === 'history' && active) return loadHistory();
   if(v === 'settings') return loadSettings();
+  if(v === 'strategy') return loadStrategy();
   render(lastData);
 }
 
@@ -574,6 +577,130 @@ function renderHistory(){
         a row is written only when a stock's signal actually changes.</p></div>`}`;
 }
 
+/* ---------------- strategy ---------------- */
+async function loadStrategy(){
+  try{ strat = await api('/api/strategy'); }
+  catch(e){ toast(e.message); strat = null; }
+  render(lastData);
+}
+
+async function runScan(){
+  toast('Scanning for contraction — this takes a while on a big list…');
+  try{
+    const r = await api('/api/strategy/scan', {method:'POST'});
+    toast(`${r.candidates.length} contracted of ${r.scanned} scanned`
+      + (r.failed.length ? ` · ${r.failed.length} failed to load` : ''));
+    loadStrategy();
+  }catch(e){ toast(e.message); }
+}
+
+async function runSweep(){
+  try{
+    const r = await api('/api/strategy/sweep', {method:'POST'});
+    toast(r.events.length
+      ? r.events.map(e => `${e.kind} ${e.symbol}`).join(' · ')
+      : 'No triggers. Nothing crossed its level.');
+    loadStrategy();
+  }catch(e){ toast(e.message); }
+}
+
+async function closeTrade(id){
+  if(!confirm('Close this trade in the journal?')) return;
+  await api('/api/strategy/trades/' + id, {method:'DELETE'});
+  loadStrategy();
+}
+
+function entryPhrase(c){
+  const L = c.level.toUpperCase();
+  if(c.entry_mode === 'buffer') return `entry ${c.entry_buffer_pct}% above ${L}`;
+  if(c.entry_mode === 'candle') return `entry on a candle closing above ${L}`;
+  return `entry ${c.entry_buffer_pct}% above ${L}, or a candle closing above it`;
+}
+
+function renderStrategy(){
+  if(!strat) return '<div class="empty"><p>Loading strategy…</p></div>';
+  const c = strat.config, s = strat.summary;
+  const steps = c.trail_steps.map(([g, at]) => `+${g}%→${at ? '+' + at + '%' : 'entry'}`)
+    .join('  ');
+
+  const cands = strat.candidates.map(x => `<tr>
+      <td>${esc(x.symbol)}</td><td>${esc(x.exchange)}</td>
+      <td>${x.band_pct}%</td><td>${esc(x.level_name)} ${money(x.level_price)}</td>
+      <td>${money(x.price)}</td>
+      <td>${x.status === 'ENTERED' ? '<span class="up">entered</span>'
+            : '<span class="open">watching</span>'}</td></tr>`).join('');
+
+  const openRows = strat.open.map(t => {
+    const risk = ((t.stop_price - t.entry_price) / t.entry_price * 100);
+    return `<tr>
+      <td>${esc(t.symbol)}</td>
+      <td>${money(t.entry_price)}<br><span class="open">${stamp(t.entry_at)}</span></td>
+      <td>${esc(t.level_name)} ${money(t.level_price)}</td>
+      <td>${money(t.stop_price)} <span class="${risk >= 0 ? 'up' : 'down'}">
+        ${risk >= 0 ? '+' : ''}${risk.toFixed(2)}%</span></td>
+      <td>${money(t.target_price)}</td>
+      <td>${money(t.high_price)}</td>
+      <td><button class="btn ghost" onclick="closeTrade(${t.id})">Close</button></td>
+    </tr>`;
+  }).join('');
+
+  const closedRows = strat.closed.map(t => {
+    const mv = t.entry_price ? (t.exit_price - t.entry_price) / t.entry_price * 100 : 0;
+    return `<tr>
+      <td>${stamp(t.exit_at)}</td><td>${esc(t.symbol)}</td>
+      <td>${money(t.entry_price)}</td><td>${money(t.exit_price)}</td>
+      <td class="${mv >= 0 ? 'up' : 'down'}">${mv >= 0 ? '+' : ''}${mv.toFixed(2)}%</td>
+      <td class="sig"><b class="${t.status === 'TARGET' ? 'BUY' : t.status === 'STOPPED' ? 'SELL' : 'HOLD'}">
+        ${t.status}</b></td>
+      <td>${esc(t.exit_reason || '')}</td></tr>`;
+  }).join('');
+
+  return `<section class="panel">
+    <h2>Breakout strategy</h2>
+    <p class="lede">Scan for a contracted Camarilla band, watch those names for a
+      break above ${esc(c.level.toUpperCase())}, then track stop, target and a stepped trail.
+      <b>This alerts only — it places no orders.</b></p>
+    <div class="row" style="margin-top:14px">
+      <button class="btn solid" onclick="runScan()">Run scan</button>
+      <button class="btn" onclick="runSweep()">Check triggers now</button>
+      <span class="hint">Universe: ${c.universe.length} symbols ·
+        band under ${c.band_max_pct}% · ${esc(entryPhrase(c))} ·
+        stop ${c.sl_pct}% below · target ${c.target_pct}% · trail ${esc(steps)}</span>
+    </div>
+    <div class="cards" style="margin-top:14px">
+      <div class="stat"><b>${strat.candidates.length}</b><span>contracted today</span></div>
+      <div class="stat"><b>${strat.open.length}</b><span>open</span></div>
+      <div class="stat"><b class="up">${s.targets}</b><span>targets hit</span></div>
+      <div class="stat"><b class="down">${s.stops}</b><span>stopped out</span></div>
+      <div class="stat"><b>${s.avg_move_pct == null ? '—'
+        : (s.avg_move_pct >= 0 ? '+' : '') + s.avg_move_pct + '%'}</b>
+        <span>avg move</span></div>
+    </div>
+    <p class="lede">Prices are delayed and no order is placed, so these rows record
+      what the rules said, at the moment the app saw them — not fills you got.</p>
+  </section>
+
+  <h3 class="eyebrow" style="margin:18px 0 8px">Contracted today (${strat.scanned_at})</h3>
+  ${strat.candidates.length ? `<div class="tblwrap"><table>
+    <thead><tr><th>Symbol</th><th>Exch</th><th>Band</th><th>Trigger level</th>
+      <th>Price at scan</th><th>State</th></tr></thead>
+    <tbody>${cands}</tbody></table></div>`
+    : `<div class="empty"><p>No scan today yet. Run one before the open —
+        it uses the previous session's range, so it doesn't change during the day.</p></div>`}
+
+  ${strat.open.length ? `<h3 class="eyebrow" style="margin:22px 0 8px">Open</h3>
+    <div class="tblwrap"><table>
+      <thead><tr><th>Symbol</th><th>Entry</th><th>Level</th><th>Stop</th>
+        <th>Target</th><th>High since</th><th></th></tr></thead>
+      <tbody>${openRows}</tbody></table></div>` : ''}
+
+  ${strat.closed.length ? `<h3 class="eyebrow" style="margin:22px 0 8px">Closed</h3>
+    <div class="tblwrap"><table>
+      <thead><tr><th>When</th><th>Symbol</th><th>Entry</th><th>Exit</th><th>Move</th>
+        <th>Result</th><th>Why</th></tr></thead>
+      <tbody>${closedRows}</tbody></table></div>` : ''}`;
+}
+
 /* ---------------- settings / admin ---------------- */
 async function loadSettings(){
   try{ settings = await api('/api/settings'); }
@@ -626,9 +753,20 @@ async function toggleProfileAlerts(id, on){
   await loadProfiles(); loadSettings();
 }
 
+function saveStrategy(){
+  saveSettings({
+    band_max_pct: +$('#stBand').value,
+    entry_buffer_pct: +$('#stBuf').value,
+    sl_pct: +$('#stSl').value,
+    target_pct: +$('#stTgt').value,
+    trail_steps: $('#stTrail').value.trim(),
+    scan_universe: $('#stUni').value.trim(),
+  });
+}
+
 function renderSettings(){
   if(!settings) return '<div class="empty"><p>Loading settings…</p></div>';
-  const s = settings, L = s.loop || {};
+  const s = settings, L = s.loop || {}, st = s.strategy || {};
   const perList = profiles.map(p => `<label class="check">
       <input type="checkbox" ${p.alerts ? 'checked' : ''}
         onchange="toggleProfileAlerts(${p.id}, this.checked)"> ${esc(p.name)}</label>`)
@@ -683,6 +821,63 @@ function renderSettings(){
     <h3>Alert these watchlists</h3>
     <div class="row">${perList}</div>
 
+    <h3>Breakout strategy</h3>
+    <p class="lede">Every number the strategy uses. It alerts through the same
+      Telegram setup above and never places an order.</p>
+    <div class="row">
+      <label class="check"><input type="checkbox" ${st.enabled ? 'checked' : ''}
+        onchange="saveSettings({strategy_enabled:this.checked})">
+        Watch candidates on every background check</label>
+    </div>
+    <div class="row">
+      <label for="stLevel">Trigger level</label>
+      <select id="stLevel" class="btn" onchange="saveSettings({strategy_level:this.value})">
+        <option value="h3" ${st.strategy_level === 'h3' ? 'selected' : ''}>H3 (R3)</option>
+        <option value="h4" ${st.strategy_level === 'h4' ? 'selected' : ''}>H4 (R4)</option>
+      </select>
+      <label for="stMode" style="min-width:auto;margin-left:10px">Entry when</label>
+      <select id="stMode" class="btn" onchange="saveSettings({entry_mode:this.value})">
+        <option value="either" ${st.entry_mode === 'either' ? 'selected' : ''}>either test passes</option>
+        <option value="buffer" ${st.entry_mode === 'buffer' ? 'selected' : ''}>price clears the buffer</option>
+        <option value="candle" ${st.entry_mode === 'candle' ? 'selected' : ''}>a candle closes above</option>
+      </select>
+    </div>
+    <div class="row">
+      <label for="stBand">Band under</label>
+      <input type="number" id="stBand" step="0.05" min="0.05" max="25" value="${st.band_max_pct}">
+      <span class="hint">H3−L3 as a % of price. Smaller = tighter coil, fewer names.</span>
+    </div>
+    <div class="row">
+      <label for="stBuf">Entry buffer</label>
+      <input type="number" id="stBuf" step="0.05" min="0" max="5" value="${st.entry_buffer_pct}">
+      <span style="font-size:13px;color:var(--muted)">% above the level</span>
+    </div>
+    <div class="row">
+      <label for="stSl">Stop loss</label>
+      <input type="number" id="stSl" step="0.05" min="0.05" max="25" value="${st.sl_pct}">
+      <span style="font-size:13px;color:var(--muted)">% below the level</span>
+    </div>
+    <div class="row">
+      <label for="stTgt">Target</label>
+      <input type="number" id="stTgt" step="0.1" min="0.1" max="50" value="${st.target_pct}">
+      <span style="font-size:13px;color:var(--muted)">% above entry</span>
+    </div>
+    <div class="row">
+      <label for="stTrail">Trail steps</label>
+      <input type="text" id="stTrail" value="${esc(st.trail_steps)}">
+      <span class="hint">gain:stop pairs. <b>0.5:0</b> means "at +0.5%, move the stop
+        to entry". Comma separated, in order.</span>
+    </div>
+    <div class="row">
+      <label for="stUni">Scan universe</label>
+      <input type="text" id="stUni" value="${esc(st.scan_universe)}"
+        placeholder="blank = the ${starter.length} built-in symbols">
+      <span class="hint">Comma separated. Currently ${st.universe_size} symbols.
+        Every one is a Yahoo request per scan, so a list of hundreds will be slow
+        and may get rate-limited.</span>
+    </div>
+    <div class="row"><button class="btn solid" onclick="saveStrategy()">Save strategy</button></div>
+
     <h3>Caps</h3>
     <div class="row">
       <label for="capLists">Watchlists</label>
@@ -712,6 +907,7 @@ function render(data){
   const el = $('#body');
   if(active && view === 'history'){ el.innerHTML = renderHistory(); return; }
   if(view === 'settings'){ el.innerHTML = renderSettings(); return; }
+  if(view === 'strategy'){ el.innerHTML = renderStrategy(); return; }
   if(!active){
     el.innerHTML = `<div class="empty"><p>No watchlists yet. Each one holds its own
       set of stocks, scored independently.</p>
