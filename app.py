@@ -10,6 +10,7 @@ Run:  python app.py       ->  http://localhost:8000
 import asyncio
 import hashlib
 import hmac
+import json
 import os
 import secrets
 import sqlite3
@@ -136,6 +137,27 @@ def init_db():
                 exit_reason   TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_trades_open ON trades(status, symbol);
+            CREATE TABLE IF NOT EXISTS scan_hits (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol      TEXT NOT NULL,
+                exchange    TEXT NOT NULL,
+                timeframe   TEXT NOT NULL,
+                scanned_at  TEXT NOT NULL,
+                bar_at      TEXT NOT NULL,
+                price       REAL NOT NULL,
+                h3          REAL NOT NULL,
+                l3          REAL NOT NULL,
+                prev_h3     REAL NOT NULL,
+                prev_l3     REAL NOT NULL,
+                band_pct    REAL NOT NULL,
+                depth_pct   REAL NOT NULL,
+                streak      INTEGER NOT NULL,
+                rank_score  REAL NOT NULL,
+                rules       TEXT NOT NULL,
+                UNIQUE(symbol, exchange, timeframe, bar_at)
+            );
+            CREATE INDEX IF NOT EXISTS idx_scan_hits
+                ON scan_hits(timeframe, scanned_at, rank_score);
             CREATE TABLE IF NOT EXISTS users (
                 username    TEXT PRIMARY KEY,
                 salt        TEXT NOT NULL,
@@ -175,6 +197,11 @@ SETTING_DEFAULTS = {
     "target_pct": "1.5",           # book this far above entry
     "trail_steps": "0.5:0,1.0:0.5,1.5:1.0",   # gain% : move stop to entry+this%
     "scan_universe": "",           # blank = STARTER_SYMBOLS
+    # ---- contraction scanner (see SCANNER section) ----
+    "scan_source": "fno",          # fno | starter | custom
+    "fno_universe": "",            # blank = FNO_SYMBOLS
+    "min_turnover_cr": "50",       # skip names thinner than this (Rs crore/day)
+    "rank_min_score": "0",         # hide hits ranking below this
 }
 
 
@@ -304,6 +331,48 @@ STARTER_SYMBOLS = [
     "DMART", "INDUSINDBK", "SBILIFE", "HDFCLIFE", "BPCL", "IOC", "GAIL",
     "VEDL", "HINDALCO", "PIDILITIND", "DABUR", "GODREJCP", "MARICO",
     "TRENT", "ZOMATO", "PAYTM", "IRCTC", "IRFC", "PFC", "RECLTD",
+]
+
+
+# NSE derivatives ("futures segment") stocks - the universe the Chartink scan
+# runs over.
+#
+# IMPORTANT: this list is typed in, not fetched. NSE publishes the official F&O
+# list and revises it every few months (names are added, dropped, renamed after
+# mergers). Nothing here reaches nseindia.com to refresh it, so treat this as a
+# starting point and check it against NSE's own list periodically. It is
+# editable in Settings without touching this file, and a symbol that no longer
+# exists simply fails its own fetch and is reported - it does not break a scan.
+FNO_SYMBOLS = [
+    "ABB", "ABBOTINDIA", "ABCAPITAL", "ABFRL", "ACC", "ADANIENSOL", "ADANIENT",
+    "ADANIGREEN", "ADANIPORTS", "ALKEM", "AMBUJACEM", "ANGELONE", "APLAPOLLO",
+    "APOLLOHOSP", "APOLLOTYRE", "ASHOKLEY", "ASIANPAINT", "ASTRAL", "ATUL",
+    "AUBANK", "AUROPHARMA", "AXISBANK", "BAJAJ-AUTO", "BAJAJFINSV",
+    "BAJFINANCE", "BALKRISIND", "BANDHANBNK", "BANKBARODA", "BATAINDIA", "BEL",
+    "BERGEPAINT", "BHARATFORG", "BHARTIARTL", "BHEL", "BIOCON", "BOSCHLTD",
+    "BPCL", "BRITANNIA", "BSOFT", "CANBK", "CANFINHOME", "CHAMBLFERT",
+    "CHOLAFIN", "CIPLA", "COALINDIA", "COFORGE", "COLPAL", "CONCOR",
+    "COROMANDEL", "CROMPTON", "CUB", "CUMMINSIND", "DABUR", "DALBHARAT",
+    "DEEPAKNTR", "DIVISLAB", "DIXON", "DLF", "DRREDDY", "EICHERMOT", "ESCORTS",
+    "EXIDEIND", "FEDERALBNK", "GAIL", "GLENMARK", "GMRAIRPORT", "GNFC",
+    "GODREJCP", "GODREJPROP", "GRANULES", "GRASIM", "GUJGASLTD", "HAL",
+    "HAVELLS", "HCLTECH", "HDFCAMC", "HDFCBANK", "HDFCLIFE", "HEROMOTOCO",
+    "HINDALCO", "HINDCOPPER", "HINDPETRO", "HINDUNILVR", "ICICIBANK",
+    "ICICIGI", "ICICIPRULI", "IDEA", "IDFCFIRSTB", "IEX", "IGL", "INDHOTEL",
+    "INDIACEM", "INDIAMART", "INDIGO", "INDUSINDBK", "INDUSTOWER", "INFY",
+    "IOC", "IPCALAB", "IRCTC", "ITC", "JINDALSTEL", "JKCEMENT", "JSWSTEEL",
+    "JUBLFOOD", "KOTAKBANK", "LALPATHLAB", "LAURUSLABS", "LICHSGFIN", "LT",
+    "LTF", "LTIM", "LTTS", "LUPIN", "M&M", "M&MFIN", "MANAPPURAM", "MARICO",
+    "MARUTI", "MCX", "METROPOLIS", "MFSL", "MGL", "MOTHERSON", "MPHASIS",
+    "MRF", "MUTHOOTFIN", "NATIONALUM", "NAUKRI", "NAVINFLUOR", "NESTLEIND",
+    "NMDC", "NTPC", "OBEROIRLTY", "OFSS", "ONGC", "PAGEIND", "PEL",
+    "PERSISTENT", "PETRONET", "PFC", "PIDILITIND", "PIIND", "PNB", "POLYCAB",
+    "POWERGRID", "PVRINOX", "RAMCOCEM", "RBLBANK", "RECLTD", "RELIANCE",
+    "SAIL", "SBICARD", "SBILIFE", "SBIN", "SHREECEM", "SHRIRAMFIN", "SIEMENS",
+    "SRF", "SUNPHARMA", "SUNTV", "SYNGENE", "TATACHEM", "TATACOMM",
+    "TATACONSUM", "TATAMOTORS", "TATAPOWER", "TATASTEEL", "TCS", "TECHM",
+    "TITAN", "TORNTPHARM", "TRENT", "TVSMOTOR", "UBL", "ULTRACEMCO",
+    "UNITDSPR", "UPL", "VEDL", "VOLTAS", "WIPRO", "ZYDUSLIFE",
 ]
 
 
@@ -707,6 +776,317 @@ def run_scan(exchange: str = "NSE") -> Dict:
             "failed": failed, "scanned_at": today}
 
 
+# ----------------------------------------------------------------------------
+# SCANNER - Camarilla contraction across the F&O universe
+#
+# This is the Chartink scan, written out. Chartink's filter reads:
+#
+#     0.275 * (prevH - prevL) + prevC   >   0.275 * (H - L) + C
+#     prevC - 0.275 * (prevH - prevL)   <   C - 0.275 * (H - L)
+#
+# 0.275 is 1.1/4 - the Camarilla H3 and L3 coefficient. So the two lines say
+# "this bar's H3 is lower than the previous bar's H3" and "this bar's L3 is
+# higher than the previous bar's L3": the H3-L3 band has closed in on BOTH
+# sides and now sits entirely inside the previous band. The stock has coiled.
+#
+# That is a different test from band_pct() above, which asks whether the band
+# is narrow in absolute terms (as a % of price). A stock can have a permanently
+# narrow band without ever contracting, and a wide-range stock can contract
+# hard. This scan uses the contraction test; band_pct is still reported so you
+# can see the width too.
+# ----------------------------------------------------------------------------
+
+# period and interval to pull for each timeframe. Yahoo caps intraday history
+# at 60 days for 5m/15m, so a month is comfortably inside what it will serve.
+TIMEFRAMES = {
+    "1d": ("6mo", "1d"),
+    "15m": ("1mo", "15m"),
+    "5m": ("1mo", "5m"),
+}
+
+
+def scanner_config() -> Dict:
+    cfg = get_settings()
+
+    def num(key, fallback):
+        try:
+            return float(cfg[key])
+        except (TypeError, ValueError, KeyError):
+            return fallback
+
+    source = cfg.get("scan_source", "fno")
+    custom = [s.strip().upper() for s in
+              (cfg.get("fno_universe") or "").replace("\n", ",").split(",")
+              if s.strip()]
+    if source == "custom" and custom:
+        universe = custom
+    elif source == "starter":
+        universe = list(STARTER_SYMBOLS)
+    else:
+        universe = custom or list(FNO_SYMBOLS)
+
+    return {
+        "source": source,
+        "universe": universe,
+        "min_turnover_cr": num("min_turnover_cr", 50.0),
+        "rank_min_score": num("rank_min_score", 0.0),
+    }
+
+
+def completed_bars(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+    """
+    Drop the bar that is still forming.
+
+    While the market is open the final row - daily or intraday - is a partial
+    bar whose high, low and close are still moving. A contraction test against
+    a half-built bar flips as the day goes on, so the scan only ever reads
+    completed bars. Once the market is shut every row is final and all of them
+    count.
+    """
+    if df is None or df.empty:
+        return df
+    return df.iloc[:-1] if market_is_open() else df
+
+
+def bar_camarilla(bar) -> Dict[str, float]:
+    return camarilla(float(bar["High"]), float(bar["Low"]), float(bar["Close"]))
+
+
+def is_contraction(cur: Dict[str, float], prev: Dict[str, float]) -> bool:
+    """The Chartink test: this band sits strictly inside the previous one."""
+    return cur["h3"] < prev["h3"] and cur["l3"] > prev["l3"]
+
+
+def contraction_depth(cur: Dict[str, float], prev: Dict[str, float]) -> float:
+    """How much tighter the band got, as a % of the previous band's width."""
+    prev_width = prev["h3"] - prev["l3"]
+    if prev_width <= 0:
+        return 0.0
+    return (prev_width - (cur["h3"] - cur["l3"])) / prev_width * 100
+
+
+def contraction_streak(df: pd.DataFrame) -> int:
+    """
+    How many bars in a row, counting back from the last one, contracted.
+
+    A band that has narrowed three sessions running is a tighter spring than
+    one that only narrowed today, so this feeds the rank.
+    """
+    streak = 0
+    for i in range(len(df) - 1, 0, -1):
+        cur = bar_camarilla(df.iloc[i])
+        prev = bar_camarilla(df.iloc[i - 1])
+        if not is_contraction(cur, prev):
+            break
+        streak += 1
+    return streak
+
+
+def narrow_range(df: pd.DataFrame, n: int) -> bool:
+    """True if the last bar's range is the narrowest of the last n bars."""
+    if len(df) < n:
+        return False
+    rng = (df["High"] - df["Low"]).tail(n)
+    return bool(rng.iloc[-1] <= rng.min())
+
+
+def volume_ratio(df: pd.DataFrame, lookback: int = 20) -> Optional[float]:
+    """Last bar's volume against the average of the bars before it."""
+    vol = df["Volume"].dropna()
+    if len(vol) < 3:
+        return None
+    base = vol.iloc[-(lookback + 1):-1]
+    if base.empty or base.mean() <= 0:
+        return None
+    return float(vol.iloc[-1] / base.mean())
+
+
+def avg_turnover_cr(df: pd.DataFrame, days: int = 20) -> Optional[float]:
+    """
+    Average traded value per DAY in Rs crore.
+
+    Intraday bars are summed within each date first, so this means the same
+    thing whichever timeframe is being scanned.
+    """
+    if df is None or df.empty or "Volume" not in df:
+        return None
+    value = (df["Close"] * df["Volume"]).groupby(df.index.date).sum()
+    value = value.tail(days)
+    if value.empty:
+        return None
+    return float(value.mean()) / 1e7
+
+
+def rank_hit(df: pd.DataFrame, depth_pct: float, streak: int) -> tuple:
+    """
+    Additive, transparent rank - same idea as score_signal(): every point
+    added is reported with the reason, so a high-ranked name can be argued
+    with rather than taken on faith.
+
+    Liquidity is not scored here; it is a filter applied before ranking.
+    """
+    score, rules = 0.0, []
+
+    if depth_pct >= 25:
+        score += 1
+        rules.append(("depth", 1, f"Band {depth_pct:.0f}% tighter than the previous bar"))
+    elif depth_pct >= 10:
+        score += 0.5
+        rules.append(("depth", 0.5, f"Band {depth_pct:.0f}% tighter than the previous bar"))
+
+    if streak >= 3:
+        score += 1
+        rules.append(("streak", 1, f"Contracting {streak} bars in a row"))
+    elif streak == 2:
+        score += 0.5
+        rules.append(("streak", 0.5, "Contracting 2 bars in a row"))
+
+    vr = volume_ratio(df)
+    if vr is not None and vr < 0.8:
+        score += 1
+        rules.append(("volume", 1, f"Volume dried up to {vr:.0%} of its average"))
+
+    if narrow_range(df, 7):
+        score += 1
+        rules.append(("range", 1, "Narrowest range of the last 7 bars (NR7)"))
+    elif narrow_range(df, 4):
+        score += 0.5
+        rules.append(("range", 0.5, "Narrowest range of the last 4 bars (NR4)"))
+
+    close = df["Close"].dropna()
+    if len(close) >= 20:
+        ma20 = float(close.rolling(20).mean().iloc[-1])
+        if float(close.iloc[-1]) > ma20:
+            score += 0.5
+            rules.append(("trend", 0.5, "Holding above its 20-bar average"))
+
+    return round(score, 2), rules
+
+
+def batch_history(symbols: List[str], exchange: str, period: str,
+                  interval: str, chunk: int = 40) -> Dict[str, pd.DataFrame]:
+    """
+    Fetch many symbols per Yahoo request instead of one at a time.
+
+    The old per-symbol scan was fine for 60 names; ~190 would be 190 separate
+    requests every run and Yahoo starts refusing well before that. yfinance
+    accepts a list and batches internally, so this is a handful of calls.
+    """
+    out: Dict[str, pd.DataFrame] = {}
+    for i in range(0, len(symbols), chunk):
+        block = symbols[i:i + chunk]
+        tickers = [yahoo_symbol(s, exchange) for s in block]
+        try:
+            raw = yf.download(tickers, period=period, interval=interval,
+                              progress=False, auto_adjust=False,
+                              group_by="ticker", threads=True)
+        except Exception:  # noqa: BLE001 - one bad block must not kill the scan
+            continue
+        if raw is None or raw.empty:
+            continue
+        for sym, tk in zip(block, tickers):
+            try:
+                df = raw[tk] if isinstance(raw.columns, pd.MultiIndex) else raw
+                df = df.dropna(how="all")
+                if df is not None and not df.empty:
+                    out[sym] = df
+            except (KeyError, IndexError):
+                continue
+    return out
+
+
+def scan_contraction(timeframe: str = "1d", exchange: str = "NSE") -> Dict:
+    """
+    Run the Chartink contraction test across the universe on one timeframe
+    and store the ranked hits.
+
+    On "1d" the hits are the list for the NEXT session: the levels come from
+    the last completed daily bar, which is exactly what tomorrow trades against.
+    On "15m" and "5m" they are contractions forming within the current session.
+    """
+    if timeframe not in TIMEFRAMES:
+        raise ValueError(f"unknown timeframe {timeframe}")
+    period, interval = TIMEFRAMES[timeframe]
+    cfg = scanner_config()
+    universe = cfg["universe"]
+
+    frames = batch_history(universe, exchange, period, interval)
+    scanned_at = datetime.now(IST).isoformat()
+    hits, skipped, failed = [], 0, []
+
+    for sym in universe:
+        df = frames.get(sym)
+        if df is None:
+            failed.append(sym)
+            continue
+        df = completed_bars(df)
+        if df is None or len(df) < 2:
+            failed.append(sym)
+            continue
+
+        try:
+            cur = bar_camarilla(df.iloc[-1])
+            prev = bar_camarilla(df.iloc[-2])
+            price = float(df["Close"].iloc[-1])
+        except (KeyError, ValueError, TypeError):
+            failed.append(sym)
+            continue
+
+        if not is_contraction(cur, prev):
+            continue
+
+        turnover = avg_turnover_cr(df)
+        if turnover is not None and turnover < cfg["min_turnover_cr"]:
+            skipped += 1
+            continue
+
+        depth = contraction_depth(cur, prev)
+        streak = contraction_streak(df)
+        score, rules = rank_hit(df, depth, streak)
+        if score < cfg["rank_min_score"]:
+            continue
+
+        hits.append({
+            "symbol": sym, "exchange": exchange, "timeframe": timeframe,
+            "bar_at": df.index[-1].isoformat(),
+            "price": round(price, 2),
+            "h3": round(cur["h3"], 2), "l3": round(cur["l3"], 2),
+            "prev_h3": round(prev["h3"], 2), "prev_l3": round(prev["l3"], 2),
+            "band_pct": round((cur["h3"] - cur["l3"]) / price * 100, 2) if price else 0,
+            "depth_pct": round(depth, 2),
+            "streak": streak,
+            "turnover_cr": round(turnover, 1) if turnover is not None else None,
+            "rank_score": score,
+            "rules": [{"kind": k, "weight": w, "text": t} for k, w, t in rules],
+        })
+
+    # Best-ranked first; a tighter band breaks a tie.
+    hits.sort(key=lambda h: (-h["rank_score"], h["band_pct"]))
+
+    with db() as conn:
+        for h in hits:
+            conn.execute(
+                "INSERT OR REPLACE INTO scan_hits (symbol, exchange, timeframe,"
+                " scanned_at, bar_at, price, h3, l3, prev_h3, prev_l3, band_pct,"
+                " depth_pct, streak, rank_score, rules)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (h["symbol"], h["exchange"], h["timeframe"], scanned_at,
+                 h["bar_at"], h["price"], h["h3"], h["l3"], h["prev_h3"],
+                 h["prev_l3"], h["band_pct"], h["depth_pct"], h["streak"],
+                 h["rank_score"], json.dumps(h["rules"])))
+
+    return {
+        "timeframe": timeframe,
+        "scanned": len(universe),
+        "fetched": len(frames),
+        "hits": hits,
+        "skipped_illiquid": skipped,
+        "failed": failed,
+        "scanned_at": scanned_at,
+        "bars_complete_only": market_is_open(),
+    }
+
+
 def open_trade(cand: Dict, quote: Dict, reason: str, cfg: Dict) -> Dict:
     level = cand["level_price"]
     price = quote["price"]
@@ -957,6 +1337,10 @@ class SettingsIn(BaseModel):
     target_pct: Optional[float] = None
     trail_steps: Optional[str] = None
     scan_universe: Optional[str] = None
+    scan_source: Optional[str] = None
+    fno_universe: Optional[str] = None
+    min_turnover_cr: Optional[float] = None
+    rank_min_score: Optional[float] = None
 
 
 class AlertsIn(BaseModel):
@@ -1231,6 +1615,14 @@ def read_settings():
             "scan_universe": cfg["scan_universe"],
             "universe_size": len(strategy_config()["universe"]),
         },
+        "scanner": {
+            "scan_source": cfg.get("scan_source", "fno"),
+            "fno_universe": cfg.get("fno_universe", ""),
+            "min_turnover_cr": float(cfg.get("min_turnover_cr") or 50),
+            "rank_min_score": float(cfg.get("rank_min_score") or 0),
+            "universe_size": len(scanner_config()["universe"]),
+            "fno_builtin": len(FNO_SYMBOLS),
+        },
     }
 
 
@@ -1295,6 +1687,53 @@ def close_trade(trade_id: int, price: Optional[float] = None):
     return {"closed": trade_id}
 
 
+@app.post("/api/scan/run")
+def scan_run(timeframe: str = "1d", exchange: str = "NSE"):
+    """Run the contraction scan now. This is the 'Sync' the dashboard calls."""
+    if timeframe not in TIMEFRAMES:
+        raise HTTPException(400, f"timeframe must be one of {list(TIMEFRAMES)}")
+    return scan_contraction(timeframe, exchange)
+
+
+@app.get("/api/scan")
+def scan_read(timeframe: str = "1d", limit: int = 100):
+    """The most recent stored hits for a timeframe, best-ranked first."""
+    if timeframe not in TIMEFRAMES:
+        raise HTTPException(400, f"timeframe must be one of {list(TIMEFRAMES)}")
+    cfg = scanner_config()
+    with db() as conn:
+        last = conn.execute(
+            "SELECT MAX(scanned_at) AS t FROM scan_hits WHERE timeframe=?",
+            (timeframe,)).fetchone()["t"]
+        rows = conn.execute(
+            "SELECT * FROM scan_hits WHERE timeframe=? AND scanned_at=?"
+            " ORDER BY rank_score DESC, band_pct ASC LIMIT ?",
+            (timeframe, last, limit)).fetchall() if last else []
+
+    hits = []
+    for r in rows:
+        h = dict(r)
+        try:
+            h["rules"] = json.loads(h["rules"])
+        except (TypeError, ValueError):
+            h["rules"] = []
+        hits.append(h)
+    return {
+        "timeframe": timeframe,
+        "scanned_at": last,
+        "hits": hits,
+        "universe_size": len(cfg["universe"]),
+        "source": cfg["source"],
+    }
+
+
+@app.get("/api/scan/universe")
+def scan_universe():
+    cfg = scanner_config()
+    return {"source": cfg["source"], "symbols": cfg["universe"],
+            "count": len(cfg["universe"]), "fno_builtin": len(FNO_SYMBOLS)}
+
+
 @app.post("/api/settings")
 def write_settings(body: SettingsIn):
     updates: Dict[str, str] = {}
@@ -1332,6 +1771,16 @@ def write_settings(body: SettingsIn):
         updates["scan_universe"] = ",".join(
             s.strip().upper() for s in
             body.scan_universe.replace("\n", ",").split(",") if s.strip())
+    if body.scan_source is not None and body.scan_source in ("fno", "starter", "custom"):
+        updates["scan_source"] = body.scan_source
+    if body.fno_universe is not None:
+        updates["fno_universe"] = ",".join(
+            s.strip().upper() for s in
+            body.fno_universe.replace("\n", ",").split(",") if s.strip())
+    for key, lo, hi in (("min_turnover_cr", 0, 100000), ("rank_min_score", 0, 5)):
+        value = getattr(body, key)
+        if value is not None:
+            updates[key] = str(round(max(lo, min(hi, float(value))), 3))
     if updates:
         save_settings(updates)
     return read_settings()

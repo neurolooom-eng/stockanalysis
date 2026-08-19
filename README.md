@@ -147,6 +147,80 @@ saved.
 
 ---
 
+## Contraction scanner
+
+The **Scanner** view screens the whole NSE F&O list for stocks whose Camarilla
+band has **contracted** — the classic coil before a move.
+
+### What "contraction" means here
+
+This is the Chartink scan, written out. Chartink's filter reads:
+
+```
+0.275 * (prevH - prevL) + prevC   >   0.275 * (H - L) + C
+prevC - 0.275 * (prevH - prevL)   <   C - 0.275 * (H - L)
+```
+
+`0.275` is `1.1/4` — the Camarilla H3 and L3 coefficient. So the first line says
+*this bar's H3 is lower than the previous bar's H3*, and the second says *this
+bar's L3 is higher than the previous bar's L3*. Put together:
+
+> The H3–L3 band has closed in on **both** sides, and now sits entirely inside
+> the previous bar's band.
+
+That is a different test from the one the Breakout strategy uses below, which
+asks only whether the band is *narrow* as a percentage of price. A stock can sit
+permanently narrow without ever contracting, and a wide-range stock can contract
+hard. Both numbers are shown; the Scanner selects on contraction.
+
+### The three timeframes
+
+| Tab | What it means |
+|---|---|
+| **Daily** | The list for the **next session**. Levels come from the last completed daily bar, which is exactly what tomorrow trades against. Run it after 15:30 IST. |
+| **15 min** | Coils forming inside today's session. |
+| **5 min** | The same, finer — more hits, more noise. |
+
+A bar that is still forming is never used. While the market is open the latest
+bar's high, low and close are still moving, and a contraction test against half a
+bar flips back and forth all day. Once the market closes, every bar counts.
+
+### The rank
+
+Every hit is a genuine contraction. The rank says how *interesting* one is, and
+it is additive and fully itemised — each point is listed with its reason, so a
+high score can be argued with rather than taken on trust. Same idea as the
+BUY/SELL/HOLD score.
+
+| Points | Rule |
+|---|---|
+| +1 / +0.5 | Band ≥25% / ≥10% tighter than the previous bar |
+| +1 / +0.5 | Contracting 3+ bars / 2 bars in a row |
+| +1 | Volume dried up below 80% of its average |
+| +1 / +0.5 | Narrowest range of the last 7 (NR7) / last 4 (NR4) bars |
+| +0.5 | Holding above its 20-bar average |
+
+Maximum 4.5. Liquidity is a filter rather than a score: anything trading under
+the **Min turnover** setting (default ₹50 crore/day, averaged over 20 days) is
+dropped, because a breakout in a thin name is hard to actually get filled on.
+
+**The rank measures how tightly a stock has coiled. It says nothing about which
+way it will break.**
+
+### The F&O list
+
+The ~190 NSE derivatives symbols are **typed into `app.py`, not fetched.** NSE
+publishes the official list and revises it every few months — names get added,
+dropped, and renamed after mergers — and nothing in the app calls nseindia.com to
+refresh it. Check it against NSE's own list now and then, and paste corrections
+into *Settings → Contraction scanner → My own list*. A symbol that no longer
+exists simply fails its own fetch and gets reported; it doesn't break the scan.
+
+Symbols are fetched about 40 per Yahoo request rather than one at a time, which
+is what makes a 190-name scan practical at all.
+
+---
+
 ## Breakout strategy
 
 The **Strategy** view runs a rule set instead of a score: find coiled stocks,
@@ -373,6 +447,12 @@ and it uses the database you already have. The address changes each restart.
 - **The signal is arithmetic on past prices.** It has no view on what a stock
   will do next, and a 3/3 score is not a strong claim about the future. Paper
   trade it for a few weeks and check the history before risking money.
+- **The F&O list is hand-maintained.** It is typed into the code, not fetched
+  from NSE, so it drifts out of date as NSE revises the segment. If a name you
+  expect never appears, check it is still in the list and still spelled the way
+  NSE spells it.
+- **The scanner has no unattended mode yet.** *Sync now* is a button you press.
+  Scheduled 15-minute refreshes and alerts on new contractions are Phase 2.
 
 ---
 
