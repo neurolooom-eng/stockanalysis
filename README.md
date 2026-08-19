@@ -42,7 +42,8 @@ Mac/Linux form, which is why PowerShell rejected it.
   open. It pauses when the tab is hidden and catches up when you come back, so a
   forgotten tab doesn't sit there hammering Yahoo.
 
-Three views along the top: **Signals**, **History** and **Settings**.
+Five views along the top: **Signals**, **Scanner**, **Strategy**, **History**
+and **Settings**.
 
 Each card shows the pivot ladder with live price marked on it, and a breakdown of
 exactly which conditions produced the score. Nothing is a black box — if a stock
@@ -458,16 +459,22 @@ and it uses the database you already have. The address changes each restart.
 
 ## Sensible next steps
 
-1. **Proper accounts** (backlog): password-change screen, per-user private
+1. **Scanner Phase 2** (backlog): let the scanner run itself — re-scan every 15
+   minutes and send a Telegram message when a *new* name starts contracting,
+   instead of pressing *Sync now*. The blocker is hosting rather than the code:
+   a free host that sleeps when idle can't deliver 15-minute alerts reliably.
+2. **Proper accounts** (backlog): password-change screen, per-user private
    watchlists, sensible passwords, and rate-limiting on the sign-in form. What
    exists today is a gate over shared data.
-2. **Broker feed** (Zerodha Kite, Angel One, Dhan) for genuinely live prices.
+3. **Broker feed** (Zerodha Kite, Angel One, Dhan) for genuinely live prices.
    Only `analyse()` needs to change — everything downstream of it is
    source-agnostic.
-3. **Exchange holiday calendar**, so the checker doesn't bother polling on days
+4. **Exchange holiday calendar**, so the checker doesn't bother polling on days
    the market never opened.
-4. **Alert thresholds** — e.g. only message on BUY/SELL, never on HOLD, or only
+5. **Alert thresholds** — e.g. only message on BUY/SELL, never on HOLD, or only
    above a score you choose.
+6. **Refresh the F&O list** against NSE's own published list now and then — it
+   is typed into the code and drifts as NSE revises the segment.
 
 Done since the first build: Telegram alerts, the history and hit-rate view,
 configurable caps, auto-refresh, a sign-in gate, and a Render blueprint.

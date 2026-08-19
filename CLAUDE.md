@@ -122,25 +122,32 @@ the README for the recovery command if a pull ever removes it.
 - Hit rate is measured at bar closes on delayed data with no costs modelled. It
   describes what the score did; it is not a backtest.
 
-## Scanner Phase 2 (agreed, not built)
+## Backlog
 
-The owner asked for the scanner to run unattended on a 15-minute cadence with
-Telegram alerts on new contractions, then chose to test Phase 1 by hand first.
-Phase 2 was written and then deliberately backed out, so `main` has no dormant
-half-feature. When picking it up: alert on **newly appearing** symbols only
-(a stock that stays coiled must not message every 15 minutes), and keep the
-existing rule that a first sighting is silent — otherwise the first run fires
-one message per hit. Hosting is still undecided; a free host that sleeps cannot
-do this dependably.
+Not active work. The owner sets the order; don't start any of these unasked.
 
-## Next steps, in the owner's priority order
-
-1. **Proper accounts** (owner's own backlog item): password-change screen,
+1. **Scanner Phase 2 — unattended scanning and alerts** (owner moved this to
+   the backlog after Phase 1 shipped, to test the scanner by hand first).
+   Agreed shape: re-run the intraday scan every 15 minutes and message on new
+   contractions. It was written and then deliberately backed out, so the repo
+   carries no dormant half-feature. When picking it up:
+   - Alert on **newly appearing** symbols only. A stock that stays coiled must
+     not message every 15 minutes — same reason `signal_log` records changes
+     rather than every pass.
+   - Keep the first-sighting-is-silent rule, or the very first run fires one
+     message per hit.
+   - Distinguish "no previous scan exists" from "previous scan lacked this
+     symbol"; they are not the same and only the second should alert.
+   - **Hosting is the real blocker**, not the code. A free host that sleeps
+     when idle cannot do dependable 15-minute alerts.
+2. **Proper accounts** (owner's own backlog item): password-change screen,
    per-user private watchlists, real passwords, rate-limited sign-in.
-2. **Broker feed** (Zerodha Kite / Angel One / Dhan) for genuinely live prices.
+3. **Broker feed** (Zerodha Kite / Angel One / Dhan) for genuinely live prices.
    Only `analyse()` needs to change.
-3. **Holiday calendar** for the alert loop.
-4. **Alert thresholds** — signal types or score levels worth messaging about.
+4. **Holiday calendar** for the alert loop.
+5. **Alert thresholds** — signal types or score levels worth messaging about.
+6. **Refresh the F&O list** against NSE's published segment list. It is typed
+   into `app.py` and drifts as NSE revises it.
 
 ## House rules
 
