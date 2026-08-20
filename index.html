@@ -304,6 +304,24 @@ let view = 'signals', lastData = null, settings = null, hist = null, caps = {}, 
 let strat = null;
 let scan = null, scanTf = localStorage.getItem('scanTf') || '1d', scanning = false;
 let buys = null, buying = false, adding = false;
+let buyFilter = localStorage.getItem('buyFilter') || 'all';
+
+function setBuyFilter(f){
+  buyFilter = f;
+  localStorage.setItem('buyFilter', f);
+  render(lastData);
+}
+
+/* Rows are tagged with the highest level price has cleared, so "broke the
+   lower level but not the upper" is exactly the rows tagged with the lower
+   one. No second scan needed - it is the same data, sliced. */
+function filteredBuys(){
+  if(!buys || !buys.buys) return [];
+  const lv = buys.levels || [];
+  if(buyFilter === 'lower') return buys.buys.filter(b => b.level_name === lv[0]);
+  if(buyFilter === 'upper') return buys.buys.filter(b => b.level_name === lv[lv.length - 1]);
+  return buys.buys;
+}
 let autoOn = localStorage.getItem('auto') === '1';
 let autoSecs = +(localStorage.getItem('autoSecs') || 60);
 let autoTimer = null;
@@ -799,9 +817,13 @@ async function buysToWatchlist(){
   const pid = sel && sel.value ? +sel.value : null;
   adding = true;
   render(lastData);
+  // Add what is on screen, not the whole list, when a group is selected.
+  const lv = (buys && buys.levels) || [];
+  const only = buyFilter === 'lower' ? lv[0]
+    : buyFilter === 'upper' ? lv[lv.length - 1] : null;
   try{
     const r = await api('/api/buylist/to-watchlist',
-      {method:'POST', body:JSON.stringify({profile_id: pid})});
+      {method:'POST', body:JSON.stringify({profile_id: pid, only_level: only})});
     let msg = `${r.added.length} added to ${r.name}`;
     if(r.already_there.length) msg += ` · ${r.already_there.length} already there`;
     if(r.no_room.length)
@@ -810,6 +832,19 @@ async function buysToWatchlist(){
     await loadProfiles();
   }catch(e){ toast(e.message); }
   finally{ adding = false; render(lastData); }
+}
+
+/* How far the next level up still is. For a stock that has broken the lower
+   level and not the upper one, that upper level is the obvious first target,
+   and this is the distance to it. Once it is through, there is no level left
+   above to measure against. */
+function roomTo(b){
+  // The server computes and stores this, and sorts on it. Fall back to working
+  // it out here only for rows written before the column existed.
+  const pct = (b.room_pct != null) ? b.room_pct
+    : (b.h4 && b.price ? (b.h4 - b.price) / b.price * 100 : null);
+  if(pct == null || pct <= 0) return '<span class="open">past it</span>';
+  return `<b class="up">+${pct.toFixed(2)}%</b>`;
 }
 
 function renderBuys(){
@@ -837,15 +872,39 @@ function renderBuys(){
         : ''}
     </div>`;
 
+  const topLevel = lv[lv.length - 1];
   if(!buys) return head + `<div class="empty"><p>Loading…</p></div></section>`;
 
   if(!buys.buys.length){
-    return head + `<div class="empty"><p>Nothing above R3 in the last check.
-      Press <b>Sync now</b> to scan ${buys.universe_size} F&amp;O symbols.</p>
+    return head + `<div class="empty"><p>Nothing above ${esc(lv[0])} in the last
+      check. Press <b>Sync now</b> to scan ${buys.universe_size} F&amp;O symbols.</p>
       </div></section>`;
   }
 
-  const rows = buys.buys.map(b => `<tr>
+  const nLower = buys.buys.filter(b => b.level_name === lv[0]).length;
+  const nUpper = buys.buys.filter(b => b.level_name === topLevel).length;
+
+  // Only worth offering when the system actually has two breakout levels.
+  // DeMark and CPR have one, so there is no "broke A but not B" to show.
+  const filters = lv.length > 1 ? `<div class="row" style="margin-top:12px">
+      <button class="chip" aria-pressed="${buyFilter === 'all'}"
+        onclick="setBuyFilter('all')">All<span class="n">${buys.buys.length}</span></button>
+      <button class="chip" aria-pressed="${buyFilter === 'lower'}"
+        onclick="setBuyFilter('lower')">Broke ${esc(lv[0])}, not ${esc(topLevel)}
+        <span class="n">${nLower}</span></button>
+      <button class="chip" aria-pressed="${buyFilter === 'upper'}"
+        onclick="setBuyFilter('upper')">Above ${esc(topLevel)}
+        <span class="n">${nUpper}</span></button>
+    </div>` : '';
+
+  const shown = filteredBuys();
+  if(!shown.length){
+    return head + filters + `<div class="empty"><p>Nothing in this group right
+      now. ${buys.buys.length} name${buys.buys.length === 1 ? '' : 's'} in the
+      others.</p></div></section>`;
+  }
+
+  const rows = shown.map(b => `<tr>
       <td><b class="click" onclick="openChart('${esc(b.symbol)}','${esc(b.exchange)}')">${esc(b.symbol)}</b>${b.coiled
         ? ' <span class="chip" style="padding:2px 8px;font-size:11px">coiled</span>'
         : ''}</td>
@@ -853,37 +912,45 @@ function renderBuys(){
       <td>${money(b.price)}</td>
       <td>${money(b.level_price)}</td>
       <td class="up">+${b.above_pct}%</td>
+      <td>${roomTo(b)}</td>
       <td>${money(b.h3)}</td>
       <td>${money(b.h4)}</td>
       <td>${b.turnover_cr == null ? '—' : b.turnover_cr + ' cr'}</td>
     </tr>`).join('');
 
-  const topLevel = lv[lv.length - 1];
-  const r4 = buys.buys.filter(b => b.level_name === topLevel).length;
+  const r4 = nUpper;
   const coiled = buys.buys.filter(b => b.coiled).length;
 
-  return head + `
+  return head + filters + `
     <div class="cards" style="margin-top:14px">
       <div class="stat"><b class="up">${buys.buys.length}</b><span>above ${esc(lv[0])}</span></div>
+      ${lv.length > 1 ? `<div class="stat"><b class="up">${nLower}</b>
+        <span>${esc(lv[0])} not ${esc(topLevel)}</span></div>` : ''}
       <div class="stat"><b class="up">${r4}</b><span>above ${esc(topLevel)}</span></div>
       <div class="stat"><b>${coiled}</b><span>also coiled</span></div>
       <div class="stat"><b>${buys.universe_size}</b><span>symbols scanned</span></div>
     </div>
     <table style="margin-top:14px">
       <thead><tr><th>Symbol</th><th>Level</th><th>Price</th><th>Level at</th>
-        <th>Above by</th><th>${esc(buys.buys[0]?.h3_name || lv[0])}</th>
+        <th>Above by</th><th>Room to ${esc(topLevel)}</th>
+        <th>${esc(buys.buys[0]?.h3_name || lv[0])}</th>
         <th>${esc(buys.buys[0]?.h4_name || topLevel)}</th><th>Turnover</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
+    ${lv.length > 1 ? `<p class="hint"><b>${esc(lv[0])} not ${esc(topLevel)}</b> is
+      the group that has cleared the first level but not the second — the break has
+      happened and ${esc(topLevel)} is still ahead as the obvious first target.
+      <b>Room to ${esc(topLevel)}</b> is how far that is from here.</p>` : ''}
     <p class="hint"><b>Add to watchlist</b> puts these names on a watchlist so the
-      score, alerts and history start tracking them. They go on in the order shown,
+      score, alerts and history start tracking them — whichever group you have
+      selected, so what you see is what goes on. They are added in the order shown,
       so if there are more than a watchlist holds, the freshest breaks go on first
       and the rest are reported rather than dropped quietly.</p>
-    <p class="lede"><b>Sorted by how recently it broke, not how far it has run.</b>
-      A stock 0.1% over R3 has just crossed; one 4% over crossed a while ago and
-      the move you would be buying has largely happened. <b>coiled</b> marks names
-      that are also contracting — a break out of a coil is the more interesting of
-      the two. Yahoo data is delayed and this places no orders.</p>
+    <p class="lede"><b>Sorted by how much room is left to ${esc(topLevel)}</b> —
+      furthest still to run at the top. Names already through ${esc(topLevel)}
+      have no room left to measure and sit at the bottom. <b>coiled</b> marks
+      names that are also contracting — a break out of a coil is the more
+      interesting of the two. Yahoo data is delayed and this places no orders.</p>
   </section>`;
 }
 
