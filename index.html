@@ -557,6 +557,18 @@ function ladder(s){
   return html;
 }
 
+/* Growth since the stock was added, measured from the close frozen that day.
+   Different from the change % beside the price, which is only today's move. */
+function growthSpan(s){
+  if(s.since_pct == null || s.ref_close == null) return '';
+  const cls = s.since_pct >= 0 ? 'up' : 'down';
+  const when = s.ref_date
+    ? new Date(s.ref_date).toLocaleDateString('en-IN', {day:'2-digit', month:'short'})
+    : '';
+  return `<span title="From ₹${s.ref_close}${when ? ', the close before it was added ' + when : ''}">
+    <b>Since added</b> <i class="${cls}">${s.since_pct >= 0 ? '+' : ''}${s.since_pct}%</i></span>`;
+}
+
 function card(s){
   if(s.error) return `<article class="card err"><div class="head">
       <div class="sym click" onclick="openChart('${esc(s.symbol)}','${esc(s.exchange)}')"
@@ -590,6 +602,7 @@ function card(s){
       <span><b>MA${s.ma_fast_period}</b> ${s.ma_fast ?? '—'}</span>
       <span><b>MA${s.ma_slow_period}</b> ${s.ma_slow ?? '—'}</span>
       <span><b>VWAP</b> ${s.vwap ?? '—'}</span>
+      ${growthSpan(s)}
     </div>
     <div class="why">${why}</div>
     <p class="foot">${s.basis} · ${new Date(s.as_of).toLocaleString('en-IN',
@@ -838,6 +851,17 @@ async function buysToWatchlist(){
    level and not the upper one, that upper level is the obvious first target,
    and this is the distance to it. Once it is through, there is no level left
    above to measure against. */
+/* A signed percentage, coloured, with an optional "since when" tooltip. */
+function pctCell(pct, since){
+  if(pct == null) return '<span class="open">—</span>';
+  const cls = pct >= 0 ? 'up' : 'down';
+  const when = since
+    ? ` title="Since ${new Date(since).toLocaleDateString('en-IN',
+        {day:'2-digit', month:'short'})}"`
+    : '';
+  return `<b class="${cls}"${when}>${pct >= 0 ? '+' : ''}${pct}%</b>`;
+}
+
 function roomTo(b){
   // The server computes and stores this, and sorts on it. Fall back to working
   // it out here only for rows written before the column existed.
@@ -913,6 +937,8 @@ function renderBuys(){
       <td>${money(b.level_price)}</td>
       <td class="up">+${b.above_pct}%</td>
       <td>${roomTo(b)}</td>
+      <td>${pctCell(b.today_pct)}</td>
+      <td>${pctCell(b.since_pct, b.first_at)}</td>
       <td>${money(b.h3)}</td>
       <td>${money(b.h4)}</td>
       <td>${b.turnover_cr == null ? '—' : b.turnover_cr + ' cr'}</td>
@@ -933,6 +959,7 @@ function renderBuys(){
     <table style="margin-top:14px">
       <thead><tr><th>Symbol</th><th>Level</th><th>Price</th><th>Level at</th>
         <th>Above by</th><th>Room to ${esc(topLevel)}</th>
+        <th>Today</th><th>Since flagged</th>
         <th>${esc(buys.buys[0]?.h3_name || lv[0])}</th>
         <th>${esc(buys.buys[0]?.h4_name || topLevel)}</th><th>Turnover</th></tr></thead>
       <tbody>${rows}</tbody>

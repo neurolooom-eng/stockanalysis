@@ -45,6 +45,12 @@ Mac/Linux form, which is why PowerShell rejected it.
 Six views along the top: **Signals**, **Buy list**, **Scanner**, **Strategy**,
 **History** and **Settings**.
 
+Cards show a **Since added** figure alongside the moving averages: growth
+measured from the previous session's close on the day you added the stock,
+frozen at that point. The percentage beside the price is only today's move; this
+one is how the pick has done since you made it. Names added before this existed
+have no reference and show nothing.
+
 Each card shows the pivot ladder with live price marked on it, and a breakdown of
 exactly which conditions produced the score. Nothing is a black box — if a stock
 reads BUY at +2.5, the card tells you which three tests it passed.
@@ -293,6 +299,27 @@ column reads *past it*.
 
 On DeMark and CPR there is only one breakout level, so no groups are shown —
 there is no "broke one but not the other" to separate.
+
+### Today vs since flagged
+
+Two growth columns, and they answer different questions.
+
+**Today** is the move against the previous session's close. It resets every
+morning.
+
+**Since flagged** is measured from the close of the day *before the stock first
+appeared on this list*, and keeps counting for as long as it stays on. On the
+first sighting the two are identical; from the next day they diverge, and the
+gap is what the signal has actually produced since it fired.
+
+The reference is frozen when a name first appears, so a rescan does not move it.
+If a stock drops back below the trigger level, the reference is cleared — so if
+it breaks out again next week the clock starts again rather than reporting
+growth from a run that already ended.
+
+A stock whose price failed to load keeps its reference. No data is not the same
+thing as "no longer a buy", and a transient Yahoo hiccup shouldn't lose the
+history.
 
 ### Turning the Buy list into a watchlist
 

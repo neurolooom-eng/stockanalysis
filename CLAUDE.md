@@ -91,6 +91,20 @@ the README for the recovery command if a pull ever removes it.
   `RENDER_GIT_COMMIT` on Render, else `git rev-parse`, else app.py's mtime. It
   is served from `/api/health`, which is outside the login gate on purpose, so
   the owner can check which version is live without signing in.
+- **A reference close is frozen when a name is flagged, and growth measured
+  from it.** `watchlist.ref_close` is the previous session's close on the day a
+  stock was added; `buy_first_seen.ref_close` is the same for the day it first
+  appeared on the Buy list. Both are deliberately *not* recomputed — that is
+  the whole point, and `change_pct` already covers today's move. The Buy list
+  shows both side by side; they agree on a first sighting and diverge after.
+- **A name falling off the Buy list clears its `buy_first_seen` row**, so a
+  later breakout starts a fresh clock instead of reporting growth across a gap.
+  Symbols that merely failed to fetch are left alone — no data is not the same
+  as no longer qualifying, and clearing them would lose the reference to a
+  transient Yahoo failure.
+- **Bulk-adding from the Buy list carries the Buy list's reference across**
+  rather than re-fetching, so the watchlist measures from the same point the
+  Buy list does instead of restarting on the day it was added.
 - **The Buy list sorts on `room_pct`, most room first** — the owner's explicit
   ordering. It is stored, not derived at render time, so the SQL can sort on
   it. Names through the top level have negative room and fall to the bottom by
