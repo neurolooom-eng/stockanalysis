@@ -158,6 +158,24 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_scan_hits
                 ON scan_hits(timeframe, scanned_at, rank_score);
+            CREATE TABLE IF NOT EXISTS breakouts (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol      TEXT NOT NULL,
+                exchange    TEXT NOT NULL,
+                scanned_at  TEXT NOT NULL,
+                price       REAL NOT NULL,
+                level_name  TEXT NOT NULL,
+                level_price REAL NOT NULL,
+                above_pct   REAL NOT NULL,
+                h3          REAL NOT NULL,
+                h4          REAL NOT NULL,
+                pp          REAL NOT NULL,
+                coiled      INTEGER NOT NULL DEFAULT 0,
+                turnover_cr REAL,
+                UNIQUE(symbol, exchange, scanned_at)
+            );
+            CREATE INDEX IF NOT EXISTS idx_breakouts
+                ON breakouts(scanned_at, above_pct);
             CREATE TABLE IF NOT EXISTS users (
                 username    TEXT PRIMARY KEY,
                 salt        TEXT NOT NULL,
@@ -1087,6 +1105,105 @@ def scan_contraction(timeframe: str = "1d", exchange: str = "NSE") -> Dict:
     }
 
 
+# ----------------------------------------------------------------------------
+# BUY LIST - F&O stocks trading above R3 / R4
+#
+# "R3" and "R4" are the Camarilla H3 and H4. Price above H3 is the standard
+# Camarilla long trigger; above H4 is the stronger version of the same idea.
+#
+# Levels come from the PREVIOUS completed session, the same convention
+# analyse() uses, so this list and the Signals cards always agree about where
+# a level sits.
+#
+# This deliberately does NOT filter to contracting stocks - the owner asked for
+# any F&O name that crosses R3 or R4. Names that are ALSO coiled are flagged,
+# because a break out of a contraction is the more interesting of the two.
+# ----------------------------------------------------------------------------
+
+def scan_breakouts(exchange: str = "NSE") -> Dict:
+    cfg = scanner_config()
+    universe = cfg["universe"]
+
+    daily = batch_history(universe, exchange, "3mo", "1d")
+    intra = batch_history(universe, exchange, "5d", INTRADAY_INTERVAL)
+
+    scanned_at = datetime.now(IST).isoformat()
+    hits, skipped, failed = [], 0, []
+
+    for sym in universe:
+        d = daily.get(sym)
+        if d is None or len(d) < 2:
+            failed.append(sym)
+            continue
+        try:
+            # Same convention as analyse(): the bar behind the latest daily one
+            # is the previous completed session, and it sets today's levels.
+            prev = d.iloc[-2]
+            piv = camarilla(float(prev["High"]), float(prev["Low"]),
+                            float(prev["Close"]))
+
+            live = intra.get(sym)
+            if live is not None and not live.empty:
+                price = float(live["Close"].dropna().iloc[-1])
+                basis = f"{INTRADAY_INTERVAL} bars"
+            else:
+                price = float(d["Close"].dropna().iloc[-1])
+                basis = "daily close"
+        except (KeyError, ValueError, TypeError, IndexError):
+            failed.append(sym)
+            continue
+
+        if price <= piv["h3"]:
+            continue
+
+        turnover = avg_turnover_cr(d)
+        if turnover is not None and turnover < cfg["min_turnover_cr"]:
+            skipped += 1
+            continue
+
+        above_h4 = price > piv["h4"]
+        level_name = "R4" if above_h4 else "R3"
+        level_price = piv["h4"] if above_h4 else piv["h3"]
+
+        # Is it also coiled? Cheap to answer - the daily bars are already here.
+        coiled = False
+        bars = completed_bars(d)
+        if bars is not None and len(bars) >= 2:
+            coiled = is_contraction(bar_camarilla(bars.iloc[-1]),
+                                    bar_camarilla(bars.iloc[-2]))
+
+        hits.append({
+            "symbol": sym, "exchange": exchange,
+            "price": round(price, 2),
+            "level_name": level_name,
+            "level_price": round(level_price, 2),
+            "above_pct": round((price - level_price) / level_price * 100, 2),
+            "h3": round(piv["h3"], 2), "h4": round(piv["h4"], 2),
+            "pp": round(piv["pp"], 2),
+            "coiled": coiled,
+            "turnover_cr": round(turnover, 1) if turnover is not None else None,
+            "basis": basis,
+        })
+
+    # R4 above R3, and within each the freshest break first - a stock barely
+    # over the level has not already made the move you would be buying.
+    hits.sort(key=lambda h: (h["level_name"] != "R4", h["above_pct"]))
+
+    with db() as conn:
+        for h in hits:
+            conn.execute(
+                "INSERT OR REPLACE INTO breakouts (symbol, exchange, scanned_at,"
+                " price, level_name, level_price, above_pct, h3, h4, pp, coiled,"
+                " turnover_cr) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (h["symbol"], h["exchange"], scanned_at, h["price"],
+                 h["level_name"], h["level_price"], h["above_pct"], h["h3"],
+                 h["h4"], h["pp"], int(h["coiled"]), h["turnover_cr"]))
+
+    return {"scanned": len(universe), "buys": hits, "skipped_illiquid": skipped,
+            "failed": failed, "scanned_at": scanned_at,
+            "market_open": market_is_open()}
+
+
 def open_trade(cand: Dict, quote: Dict, reason: str, cfg: Dict) -> Dict:
     level = cand["level_price"]
     price = quote["price"]
@@ -1725,6 +1842,29 @@ def scan_read(timeframe: str = "1d", limit: int = 100):
         "universe_size": len(cfg["universe"]),
         "source": cfg["source"],
     }
+
+
+@app.post("/api/buylist/run")
+def buylist_run(exchange: str = "NSE"):
+    """Scan the F&O list for names trading above R3 / R4."""
+    return scan_breakouts(exchange.upper())
+
+
+@app.get("/api/buylist")
+def buylist_read(limit: int = 200):
+    with db() as conn:
+        last = conn.execute(
+            "SELECT MAX(scanned_at) AS t FROM breakouts").fetchone()["t"]
+        rows = conn.execute(
+            "SELECT * FROM breakouts WHERE scanned_at=?"
+            " ORDER BY (level_name='R4') DESC, above_pct ASC LIMIT ?",
+            (last, limit)).fetchall() if last else []
+    buys = [dict(r) for r in rows]
+    for b in buys:
+        b["coiled"] = bool(b["coiled"])
+    return {"scanned_at": last, "buys": buys,
+            "universe_size": len(scanner_config()["universe"]),
+            "market_open": market_is_open()}
 
 
 @app.get("/api/scan/universe")

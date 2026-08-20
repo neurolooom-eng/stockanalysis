@@ -42,8 +42,8 @@ Mac/Linux form, which is why PowerShell rejected it.
   open. It pauses when the tab is hidden and catches up when you come back, so a
   forgotten tab doesn't sit there hammering Yahoo.
 
-Five views along the top: **Signals**, **Scanner**, **Strategy**, **History**
-and **Settings**.
+Six views along the top: **Signals**, **Buy list**, **Scanner**, **Strategy**,
+**History** and **Settings**.
 
 Each card shows the pivot ladder with live price marked on it, and a breakdown of
 exactly which conditions produced the score. Nothing is a black box — if a stock
@@ -148,6 +148,42 @@ saved.
 
 ---
 
+## Buy list
+
+The **Buy list** view screens the whole F&O list for stocks trading **above R3**,
+and flags the stronger ones **above R4**.
+
+R3 and R4 are the Camarilla H3 and H4. They come from the **previous completed
+session**, which is the same convention the Signals cards use — so the two views
+can never disagree about where a level sits.
+
+This is **not** filtered to contracting stocks. Any F&O name above R3 appears.
+Names that are *also* contracting get a **coiled** chip, because a break out of a
+coil is the more interesting of the two.
+
+**The list is sorted by how recently a stock broke, not how far it has run.** A
+stock 0.1% over R3 has just crossed. One 4% over crossed a while ago, and the
+move you would be buying has largely already happened. R4 names sort above R3
+names, and within each the freshest break is at the top.
+
+Each row shows the price, which level it cleared and at what price, how far above
+it is, both R3 and R4 for context, and the stock's average turnover.
+
+### Checking it against your broker
+
+Kite plots the identical levels — Indicators → **Pivot Points Standard**, then
+set the type to **Camarilla**. Zerodha uses the same coefficients this app does
+(0.55, 0.275, 0.183, 0.0916, anchored on the previous day's H/L/C), and `0.275`
+is the same number in the Chartink filter below.
+
+Expect *near* matches rather than exact ones: this app reads Yahoo, Kite reads
+the exchange feed, and a few paise of difference in yesterday's high shifts every
+level slightly. A large divergence means a data problem, not a formula problem.
+
+SELL and HOLD lists are backlog items — see below.
+
+---
+
 ## Contraction scanner
 
 The **Scanner** view screens the whole NSE F&O list for stocks whose Camarilla
@@ -185,6 +221,26 @@ hard. Both numbers are shown; the Scanner selects on contraction.
 A bar that is still forming is never used. While the market is open the latest
 bar's high, low and close are still moving, and a contraction test against half a
 bar flips back and forth all day. Once the market closes, every bar counts.
+
+### How much history it looks at
+
+The contraction test itself uses **two bars** — the last completed one and the
+one before it. That is all your Chartink filter compares, and nothing older can
+make a stock contract or not.
+
+The *rank* looks back further:
+
+| Component | Lookback |
+|---|---|
+| Contraction test | **2 bars** |
+| Contracting streak | as far back as it keeps contracting |
+| Volume dry-up | 20 bars |
+| NR4 / NR7 | 4 and 7 bars |
+| 20-bar average | 20 bars |
+| Turnover filter | 20 days |
+
+Six months of daily bars are fetched (one month for 15m and 5m), but only as
+headroom so the 20-bar figures exist. The decision is still two bars.
 
 ### The rank
 
@@ -463,17 +519,20 @@ and it uses the database you already have. The address changes each restart.
    minutes and send a Telegram message when a *new* name starts contracting,
    instead of pressing *Sync now*. The blocker is hosting rather than the code:
    a free host that sleeps when idle can't deliver 15-minute alerts reliably.
-2. **Proper accounts** (backlog): password-change screen, per-user private
+2. **SELL and HOLD lists** (backlog): the mirror of the Buy list — F&O stocks
+   that have broken *below* L3 and L4 — plus a HOLD view for names sitting
+   inside the band. Same code with the levels flipped.
+3. **Proper accounts** (backlog): password-change screen, per-user private
    watchlists, sensible passwords, and rate-limiting on the sign-in form. What
    exists today is a gate over shared data.
-3. **Broker feed** (Zerodha Kite, Angel One, Dhan) for genuinely live prices.
+4. **Broker feed** (Zerodha Kite, Angel One, Dhan) for genuinely live prices.
    Only `analyse()` needs to change — everything downstream of it is
    source-agnostic.
-4. **Exchange holiday calendar**, so the checker doesn't bother polling on days
+5. **Exchange holiday calendar**, so the checker doesn't bother polling on days
    the market never opened.
-5. **Alert thresholds** — e.g. only message on BUY/SELL, never on HOLD, or only
+6. **Alert thresholds** — e.g. only message on BUY/SELL, never on HOLD, or only
    above a score you choose.
-6. **Refresh the F&O list** against NSE's own published list now and then — it
+7. **Refresh the F&O list** against NSE's own published list now and then — it
    is typed into the code and drifts as NSE revises the segment.
 
 Done since the first build: Telegram alerts, the history and hit-rate view,
