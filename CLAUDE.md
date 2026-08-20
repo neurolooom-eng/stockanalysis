@@ -63,6 +63,38 @@ the README for the recovery command if a pull ever removes it.
   polls and the alert loop sweeps; logging every pass would bury the real
   transitions and make the hit rate meaningless. This is also what makes "alert
   on change" and "history" the same mechanism — `score_profile()` serves both.
+- **Six pivot systems, one selected in settings** (`pivot_system`): Camarilla,
+  Classic, Fibonacci, Woodie, DeMark, CPR. Everything follows it — the score,
+  the Scanner, the Buy list, the chart. The owner explicitly chose "everything,
+  Scanner included" after being told it breaks the Chartink match, so don't
+  quietly narrow the scope back.
+- **Each system declares its own `band` and `breakout` levels** in
+  `PIVOT_SYSTEMS`, so nothing downstream hardcodes H3/L3 any more. The band is
+  what the contraction test compares (Camarilla R3/S3, CPR TC/BC, others
+  R1/S1); breakout is what the Buy list triggers on. Add a system by adding a
+  formula plus that metadata — don't special-case it in the consumers.
+- **Levels are displayed as R and S, always** (`pretty_level()`). Camarilla's
+  internal keys are h1-h4/l1-l4, but Kite, Chartink and the owner all say R3
+  and S3. Internal keys stay as they are; only the display name changes.
+- **The pivot system is part of the `_cache` key**, and switching it clears the
+  cache. Without that, changing system serves back quotes scored on the old
+  levels.
+- **The Scanner shows an amber warning when not on Camarilla**, because that is
+  the moment it stops matching the owner's Chartink scan. Don't remove it.
+- **The chart is hand-drawn SVG, no charting library.** Same reason as no React:
+  four files, no build step. It also means no drawing tools or pan/zoom, which
+  is an accepted trade, not an oversight. Levels are drawn from the previous
+  session regardless of the bar interval, so lines don't move between
+  timeframes. Labels are suppressed (not the lines) where they would collide,
+  band and PP claiming slots first.
+- **The footer carries a build stamp** (`build_info()`): commit from
+  `RENDER_GIT_COMMIT` on Render, else `git rev-parse`, else app.py's mtime. It
+  is served from `/api/health`, which is outside the login gate on purpose, so
+  the owner can check which version is live without signing in.
+- **Buy list → watchlist is additive, never destructive.** One click, but it
+  skips names already there and reports them, keeps whatever else is on the
+  target watchlist, and respects the per-watchlist cap — filling from the top
+  of the list and naming what didn't fit. Don't "improve" it into a replace.
 - **"Contraction" means the inside-band test, not a narrow band.** The Scanner
   selects stocks where this bar's H3 < the previous bar's H3 **and** this bar's
   L3 > the previous bar's L3 — the band has closed in on both sides and sits
@@ -99,12 +131,18 @@ the README for the recovery command if a pull ever removes it.
 - **Caps are settings, not constants.** Watchlists (10) and stocks per watchlist
   (30) are rows in `settings`, editable from the Settings page, enforced
   server-side. The env vars are starting values only.
+- **`seed_users()` fills in missing accounts, one by one.** It used to bail if
+  the table had any rows, which meant adding a name to `SEED_USERS` only worked
+  on a brand new database. It now checks per user, so a new seed account
+  appears on the next restart of an existing database. It never touches an
+  existing row, so a changed password is not reset — but deleting a seeded user
+  brings it back unless you also remove it from `SEED_USERS`.
 - **A symbol's first sighting never alerts.** It is logged silently, so adding
   thirty stocks doesn't fire thirty messages.
 - **The bot token is never returned by the API in full** — `/api/settings` sends
   back only the last four characters.
-- **The login is a gate over shared data, by explicit decision.** Two seeded
-  users (`pnk`, `kau`, both `123`), salted+hashed, signed HMAC cookie, everything
+- **The login is a gate over shared data, by explicit decision.** Three seeded
+  users (`pnk`, `kau`, `kaushik`, all `123`), salted+hashed, signed HMAC cookie, everything
   under `/api/` closed except health/login/me. The owner asked for exactly this
   and moved real accounts to the backlog — don't gold-plate it unasked.
 - **GitHub Pages cannot host this** (static only, no Python). The owner tried;

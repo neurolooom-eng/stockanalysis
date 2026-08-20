@@ -224,6 +224,20 @@ td.sig .BUY{color:var(--up)} td.sig .SELL{color:var(--down)} td.sig .HOLD{color:
 .empty p{margin-bottom:14px}
 .note{font-family:var(--mono);font-size:11px;color:var(--dim);
   border-top:1px solid var(--rule);margin-top:26px;padding-top:14px;line-height:1.7}
+/* Build stamp sits under the disclaimer with no second rule above it. */
+.note.build{border-top:0;margin-top:8px;padding-top:0;opacity:.75}
+.note.build b{color:var(--brass);font-weight:400}
+.chartwrap{position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:30;
+  display:flex;align-items:center;justify-content:center;padding:18px}
+.chartwrap[hidden]{display:none}
+.chartpanel{background:var(--panel);border:1px solid var(--rule);
+  padding:16px;width:100%;max-width:980px;max-height:92vh;overflow:auto}
+.chartscroll{overflow-x:auto}
+.candles{width:100%;min-width:520px;height:auto;display:block}
+.sym.click{cursor:pointer;text-decoration:underline;text-decoration-style:dotted;
+  text-underline-offset:3px}
+tbody tr td b.click{cursor:pointer;text-decoration:underline;
+  text-decoration-style:dotted;text-underline-offset:3px}
 .toast{position:fixed;left:16px;right:16px;bottom:16px;background:var(--panel-2);
   border:1px solid var(--brass-dim);color:var(--paper);padding:11px 14px;
   font-size:13px;z-index:9;border-radius:2px}
@@ -260,6 +274,17 @@ td.sig .BUY{color:var(--up)} td.sig .SELL{color:var(--down)} td.sig .HOLD{color:
   </form>
 </div>
 
+<div class="chartwrap" id="chartWrap" hidden onclick="if(event.target===this)closeChart()">
+  <section class="chartpanel">
+    <div class="row" style="justify-content:space-between;align-items:center">
+      <h2 id="chartTitle" style="margin:0"></h2>
+      <div class="row" style="gap:6px;margin:0" id="chartTabs"></div>
+      <button class="btn ghost" onclick="closeChart()">Close</button>
+    </div>
+    <div id="chartBody" style="margin-top:12px"></div>
+  </section>
+</div>
+
 <nav class="rail" id="rail"></nav>
 
 <main>
@@ -269,6 +294,7 @@ td.sig .BUY{color:var(--up)} td.sig .SELL{color:var(--down)} td.sig .HOLD{color:
     broker terminal before acting on it. Signals are arithmetic on past prices,
     not advice, and carry no view on what a stock will do next.
   </p>
+  <p class="note build" id="build">&nbsp;</p>
 </main>
 
 <script>
@@ -277,7 +303,7 @@ let profiles = [], active = null, stocks = [], limit = 30, starter = [], busy = 
 let view = 'signals', lastData = null, settings = null, hist = null, caps = {}, me = null;
 let strat = null;
 let scan = null, scanTf = localStorage.getItem('scanTf') || '1d', scanning = false;
-let buys = null, buying = false;
+let buys = null, buying = false, adding = false;
 let autoOn = localStorage.getItem('auto') === '1';
 let autoSecs = +(localStorage.getItem('autoSecs') || 60);
 let autoTimer = null;
@@ -336,6 +362,24 @@ async function start(){
     await loadProfiles();
   }catch(e){ showGate(); }
 }
+
+/* Build stamp. /api/health needs no login, so this shows even on the gate -
+   the point is to tell at a glance whether you are on the latest deploy or
+   looking at a cached copy of an older one. */
+async function loadBuild(){
+  try{
+    const r = await (await fetch('/api/health')).json();
+    const changed = r.code_changed_at ? new Date(r.code_changed_at) : null;
+    const started = r.started_at ? new Date(r.started_at) : null;
+    const fmt = d => d.toLocaleString('en-IN',
+      {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit'});
+    $('#build').innerHTML =
+      `Build <b>${esc(r.build)}</b>`
+      + (changed ? ` · code ${esc(fmt(changed))}` : '')
+      + (started ? ` · running since ${esc(fmt(started))}` : '');
+  }catch(e){ $('#build').textContent = 'Build unknown — server unreachable.'; }
+}
+loadBuild();
 
 function tickClock(){
   $('#clock').textContent = new Date().toLocaleTimeString('en-IN',
@@ -462,19 +506,31 @@ function setAutoSecs(v){
 }
 
 /* ---------------- the ladder ---------------- */
+/* Camarilla names its levels H1-H4 / L1-L4 internally, but Kite, Chartink and
+   we all say R and S. One naming scheme across every pivot system. */
+function prettyLevel(k){
+  if(/^h\d+$/.test(k)) return 'R' + k.slice(1);
+  if(/^l\d+$/.test(k)) return 'S' + k.slice(1);
+  return k.toUpperCase();
+}
+
 function ladder(s){
-  const p = s.pivots;
-  const lo = Math.min(p.l4, s.price), hi = Math.max(p.h4, s.price);
+  const p = s.pivots || {};
+  // The backend sends the level order for whichever system is selected, so
+  // this draws CPR's three lines or Camarilla's nine without knowing which.
+  const order = (s.pivot_order || []).filter(k => typeof p[k] === 'number');
+  if(!order.length) return '';
+  const band = s.pivot_band || [];
+  const vals = order.map(k => p[k]).concat([s.price]);
+  const lo = Math.min(...vals), hi = Math.max(...vals);
   const span = (hi - lo) || 1;
   const pad = span * 0.06;
   const y = v => (1 - (v - (lo - pad)) / (span + pad * 2)) * 100;
-  const rows = [['H4','h4','key'],['H3','h3','key'],['H2','h2',''],['H1','h1',''],
-                ['PP','pp','mid'],['L1','l1',''],['L2','l2',''],
-                ['L3','l3','key'],['L4','l4','key']];
   let html = '<div class="ladder">';
-  rows.forEach(([label, k, cls]) => {
+  order.forEach(k => {
+    const cls = k === 'pp' ? 'mid' : (band.includes(k) ? 'key' : '');
     html += `<div class="rung ${cls}" style="top:${y(p[k]).toFixed(2)}%">
-      <b>${label}</b><i>${p[k].toFixed(2)}</i></div>`;
+      <b>${prettyLevel(k)}</b><i>${p[k].toFixed(2)}</i></div>`;
   });
   if(s.vwap != null && s.vwap > lo - pad && s.vwap < hi + pad)
     html += `<div class="vline" style="top:${y(s.vwap).toFixed(2)}%"><b>VWAP</b></div>`;
@@ -485,7 +541,8 @@ function ladder(s){
 
 function card(s){
   if(s.error) return `<article class="card err"><div class="head">
-      <div class="sym">${esc(s.symbol)}<small>${esc(s.exchange)}</small></div></div>
+      <div class="sym click" onclick="openChart('${esc(s.symbol)}','${esc(s.exchange)}')"
+        title="Open chart">${esc(s.symbol)}<small>${esc(s.exchange)}</small></div></div>
       <p class="foot">Could not load: ${esc(s.error)}</p></article>`;
   const dir = s.change_pct >= 0 ? 'up' : 'down';
   const cls = s.signal.toLowerCase();
@@ -498,7 +555,8 @@ function card(s){
   }).join('');
   return `<article class="card ${cls}">
     <div class="head">
-      <div class="sym">${esc(s.symbol)}<small>${esc(s.exchange)}</small></div>
+      <div class="sym click" onclick="openChart('${esc(s.symbol)}','${esc(s.exchange)}')"
+        title="Open chart">${esc(s.symbol)}<small>${esc(s.exchange)}</small></div>
       <div class="px">
         <div class="v">${money(s.price)}</div>
         <div class="d ${dir}">${s.change_pct >= 0 ? '▲' : '▼'} ${Math.abs(s.change_pct).toFixed(2)}%</div>
@@ -584,6 +642,133 @@ function renderHistory(){
 }
 
 /* ---------------- strategy ---------------- */
+/* ---------------- chart ---------------- */
+let chartSym = null, chartEx = 'NSE', chartInt = localStorage.getItem('chartInt') || '5m';
+
+async function openChart(symbol, exchange){
+  chartSym = symbol; chartEx = exchange || 'NSE';
+  $('#chartWrap').hidden = false;
+  $('#chartBody').innerHTML = '<p class="hint">Loading…</p>';
+  $('#chartTitle').textContent = symbol;
+  drawChartTabs();
+  await loadChart();
+}
+
+function closeChart(){ $('#chartWrap').hidden = true; chartSym = null; }
+
+function setChartInterval(iv){
+  chartInt = iv;
+  localStorage.setItem('chartInt', iv);
+  drawChartTabs();
+  loadChart();
+}
+
+function drawChartTabs(){
+  $('#chartTabs').innerHTML = ['5m','15m','1d'].map(iv =>
+    `<button class="chip" aria-pressed="${iv === chartInt}"
+      onclick="setChartInterval('${iv}')">${iv === '1d' ? 'Daily' : iv}</button>`).join('');
+}
+
+async function loadChart(){
+  if(!chartSym) return;
+  try{
+    const d = await api(`/api/chart?symbol=${encodeURIComponent(chartSym)}`
+      + `&exchange=${encodeURIComponent(chartEx)}&interval=${chartInt}`);
+    $('#chartBody').innerHTML = candleChart(d);
+  }catch(e){
+    $('#chartBody').innerHTML = `<p class="hint">Could not load: ${esc(e.message)}</p>`;
+  }
+}
+
+/* Candles drawn as plain SVG. No charting library on purpose - this app is
+   four files with no build step, and a CDN or npm dependency would end that. */
+function candleChart(d){
+  const W = 900, H = 380, padL = 8, padR = 62, padT = 12, padB = 22;
+  const bars = d.bars || [];
+  if(!bars.length) return '<p class="hint">No bars returned.</p>';
+
+  // Scale to the bars, then stretch just enough to keep the band levels on
+  // screen. Including every level would squash the candles flat.
+  const bandKeys = d.pivot_band || [];
+  const bandVals = bandKeys.map(k => d.pivots[k]).filter(v => v != null);
+  let lo = Math.min(...bars.map(b => b.l), ...bandVals);
+  let hi = Math.max(...bars.map(b => b.h), ...bandVals);
+  const span = (hi - lo) || 1;
+  lo -= span * 0.05; hi += span * 0.05;
+
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const x = i => padL + (i + 0.5) * (plotW / bars.length);
+  const y = v => padT + (1 - (v - lo) / (hi - lo)) * plotH;
+  const cw = Math.max(1.2, Math.min(9, plotW / bars.length * 0.62));
+
+  // Pivot lines, skipping any that fall outside the visible price range.
+  //
+  // Camarilla's R1/R2/R3 can sit within a rupee of each other, which turns the
+  // labels into overlapping mush. So the line is always drawn, but the LABEL is
+  // only drawn where it has room. The band and PP claim their spots first,
+  // since those are the ones worth reading.
+  const visible = (d.pivot_order || [])
+    .filter(k => d.pivots[k] != null && d.pivots[k] >= lo && d.pivots[k] <= hi)
+    .map(k => ({k, v: d.pivots[k], yy: y(d.pivots[k]),
+                key: k === 'pp' || bandKeys.includes(k)}));
+  // Claim label slots in priority order: the band first (those are the levels
+  // that matter), then PP, then everything else if it still has room.
+  const MIN_GAP = 11;
+  const taken = [];
+  const claim = o => {
+    if(taken.every(t => Math.abs(t - o.yy) >= MIN_GAP)){
+      o.label = true;
+      taken.push(o.yy);
+    }
+  };
+  visible.filter(o => bandKeys.includes(o.k)).forEach(claim);
+  visible.filter(o => o.k === 'pp').forEach(claim);
+  visible.filter(o => !o.key).forEach(claim);
+
+  const lines = visible.map(o => {
+    const col = o.k === 'pp' ? 'var(--brass)'
+      : (bandKeys.includes(o.k) ? 'var(--paper)' : 'var(--dim)');
+    const dash = o.key ? '' : 'stroke-dasharray="3 4"';
+    const text = o.label
+      ? `<text x="${W - padR + 5}" y="${(o.yy + 3.5).toFixed(1)}" fill="${col}"
+          font-size="10" font-family="ui-monospace,monospace"
+          opacity="0.95">${esc(d.level_names[o.k] || o.k)} ${o.v.toFixed(2)}</text>`
+      : '';
+    return `<line x1="${padL}" x2="${W - padR}" y1="${o.yy.toFixed(1)}"
+        y2="${o.yy.toFixed(1)}" stroke="${col}" stroke-width="${o.key ? 1.2 : 0.8}"
+        opacity="${o.key ? 0.85 : 0.5}" ${dash}/>${text}`;
+  }).join('');
+
+  const candles = bars.map((b, i) => {
+    const up = b.c >= b.o;
+    const col = up ? 'var(--up)' : 'var(--down)';
+    const top = y(Math.max(b.o, b.c)), bot = y(Math.min(b.o, b.c));
+    const h = Math.max(1, bot - top);
+    return `<line x1="${x(i).toFixed(1)}" x2="${x(i).toFixed(1)}"
+        y1="${y(b.h).toFixed(1)}" y2="${y(b.l).toFixed(1)}"
+        stroke="${col}" stroke-width="0.9"/>
+      <rect x="${(x(i) - cw / 2).toFixed(1)}" y="${top.toFixed(1)}"
+        width="${cw.toFixed(1)}" height="${h.toFixed(1)}" fill="${col}"/>`;
+  }).join('');
+
+  const last = bars[bars.length - 1];
+  const first = new Date(bars[0].t), latest = new Date(last.t);
+  const fmt = t => t.toLocaleString('en-IN',
+    {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit'});
+
+  return `<div class="chartscroll"><svg viewBox="0 0 ${W} ${H}"
+      preserveAspectRatio="xMidYMid meet" class="candles">
+    ${lines}${candles}
+    <line x1="${padL}" x2="${W - padR}" y1="${y(last.c).toFixed(1)}"
+      y2="${y(last.c).toFixed(1)}" stroke="var(--brass)" stroke-width="0.7"
+      stroke-dasharray="2 3" opacity="0.9"/>
+  </svg></div>
+  <p class="hint">${esc(d.symbol)} · ${esc(d.interval === '1d' ? 'daily' : d.interval)}
+    bars · ${bars.length} shown, ${esc(fmt(first))} to ${esc(fmt(latest))} ·
+    last ${money(d.price)} · <b>${esc(d.pivot_label)}</b> levels from the previous
+    session. Solid lines are the band, dashed are the rest. Yahoo data is delayed.</p>`;
+}
+
 /* ---------------- buy list (above R3 / R4) ---------------- */
 async function loadBuys(){
   try{ buys = await api('/api/buylist'); }
@@ -608,15 +793,44 @@ async function runBuys(){
   finally{ buying = false; render(lastData); }
 }
 
+async function buysToWatchlist(){
+  if(adding) return;
+  const sel = $('#buyTarget');
+  const pid = sel && sel.value ? +sel.value : null;
+  adding = true;
+  render(lastData);
+  try{
+    const r = await api('/api/buylist/to-watchlist',
+      {method:'POST', body:JSON.stringify({profile_id: pid})});
+    let msg = `${r.added.length} added to ${r.name}`;
+    if(r.already_there.length) msg += ` · ${r.already_there.length} already there`;
+    if(r.no_room.length)
+      msg += ` · ${r.no_room.length} did not fit (cap ${r.cap})`;
+    toast(msg);
+    await loadProfiles();
+  }catch(e){ toast(e.message); }
+  finally{ adding = false; render(lastData); }
+}
+
 function renderBuys(){
+  const lv = (buys && buys.levels) || ['R3', 'R4'];
+  const sysName = (buys && buys.pivot_label) || 'Camarilla';
   const head = `<section class="panel">
     <h2>Buy list</h2>
-    <p class="lede">Every F&amp;O stock trading <b>above R3</b>, and the stronger
-      ones above <b>R4</b>. R3 and R4 are the Camarilla H3 and H4, taken from the
-      previous completed session — the same levels the Signals cards use.</p>
+    <p class="lede">Every F&amp;O stock trading <b>above ${esc(lv[0])}</b>${
+      lv.length > 1 ? `, and the stronger ones above <b>${esc(lv[lv.length - 1])}</b>` : ''}.
+      Levels are <b>${esc(sysName)}</b>, taken from the previous completed
+      session — the same levels the Signals cards use.</p>
     <div class="row" style="margin-top:14px">
       <button class="btn solid" onclick="runBuys()" ${buying ? 'disabled' : ''}>
         ${buying ? 'Checking…' : 'Sync now'}</button>
+      ${buys && buys.buys && buys.buys.length ? `
+        <button class="btn" onclick="buysToWatchlist()" ${adding ? 'disabled' : ''}>
+          ${adding ? 'Adding…' : 'Add to watchlist'}</button>
+        <select id="buyTarget" class="btn">
+          <option value="">New watchlist, dated</option>
+          ${profiles.map(p => `<option value="${p.id}">Add to ${esc(p.name)}</option>`).join('')}
+        </select>` : ''}
       ${buys && buys.scanned_at
         ? `<span class="hint">Last checked ${stamp(buys.scanned_at)}${
             buys.market_open ? '' : ' · market shut, so this is the last close'}</span>`
@@ -632,7 +846,7 @@ function renderBuys(){
   }
 
   const rows = buys.buys.map(b => `<tr>
-      <td><b>${esc(b.symbol)}</b>${b.coiled
+      <td><b class="click" onclick="openChart('${esc(b.symbol)}','${esc(b.exchange)}')">${esc(b.symbol)}</b>${b.coiled
         ? ' <span class="chip" style="padding:2px 8px;font-size:11px">coiled</span>'
         : ''}</td>
       <td class="sig"><b class="BUY">${esc(b.level_name)}</b></td>
@@ -644,21 +858,27 @@ function renderBuys(){
       <td>${b.turnover_cr == null ? '—' : b.turnover_cr + ' cr'}</td>
     </tr>`).join('');
 
-  const r4 = buys.buys.filter(b => b.level_name === 'R4').length;
+  const topLevel = lv[lv.length - 1];
+  const r4 = buys.buys.filter(b => b.level_name === topLevel).length;
   const coiled = buys.buys.filter(b => b.coiled).length;
 
   return head + `
     <div class="cards" style="margin-top:14px">
-      <div class="stat"><b class="up">${buys.buys.length}</b><span>above R3</span></div>
-      <div class="stat"><b class="up">${r4}</b><span>above R4</span></div>
+      <div class="stat"><b class="up">${buys.buys.length}</b><span>above ${esc(lv[0])}</span></div>
+      <div class="stat"><b class="up">${r4}</b><span>above ${esc(topLevel)}</span></div>
       <div class="stat"><b>${coiled}</b><span>also coiled</span></div>
       <div class="stat"><b>${buys.universe_size}</b><span>symbols scanned</span></div>
     </div>
     <table style="margin-top:14px">
       <thead><tr><th>Symbol</th><th>Level</th><th>Price</th><th>Level at</th>
-        <th>Above by</th><th>R3</th><th>R4</th><th>Turnover</th></tr></thead>
+        <th>Above by</th><th>${esc(buys.buys[0]?.h3_name || lv[0])}</th>
+        <th>${esc(buys.buys[0]?.h4_name || topLevel)}</th><th>Turnover</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
+    <p class="hint"><b>Add to watchlist</b> puts these names on a watchlist so the
+      score, alerts and history start tracking them. They go on in the order shown,
+      so if there are more than a watchlist holds, the freshest breaks go on first
+      and the rest are reported rather than dropped quietly.</p>
     <p class="lede"><b>Sorted by how recently it broke, not how far it has run.</b>
       A stock 0.1% over R3 has just crossed; one 4% over crossed a while ago and
       the move you would be buying has largely happened. <b>coiled</b> marks names
@@ -716,7 +936,13 @@ function renderScanner(){
     <div class="row" style="margin-top:14px">${tabs}
       <button class="btn solid" onclick="runContraction()" ${scanning ? 'disabled' : ''}>
         ${scanning ? 'Scanning…' : 'Sync now'}</button>
-    </div>`;
+    </div>
+    ${scan && scan.pivot_system && scan.pivot_system !== 'camarilla'
+      ? `<p class="lede" style="color:var(--brass)">Running on
+          <b>${esc(scan.pivot_label)}</b>, measuring the
+          <b>${esc(scan.band_label)}</b> band — <b>not</b> Camarilla, so these
+          results will not match your Chartink scan. Change it in Settings.</p>`
+      : ''}`;
 
   if(!scan) return head + `<div class="empty"><p>Loading…</p></div></section>`;
 
@@ -730,7 +956,7 @@ function renderScanner(){
       `<span class="chip" style="padding:2px 8px;font-size:11px"
         title="+${r.weight}">${esc(r.text)}</span>`).join(' ');
     return `<tr>
-      <td><b>${esc(h.symbol)}</b></td>
+      <td><b class="click" onclick="openChart('${esc(h.symbol)}','${esc(h.exchange)}')">${esc(h.symbol)}</b></td>
       <td class="sig"><b class="${h.rank_score >= 2.5 ? 'BUY' : 'HOLD'}"
         >${h.rank_score}</b></td>
       <td>${money(h.price)}</td>
@@ -963,7 +1189,8 @@ function saveStrategy(){
 
 function renderSettings(){
   if(!settings) return '<div class="empty"><p>Loading settings…</p></div>';
-  const s = settings, L = s.loop || {}, st = s.strategy || {}, sc = s.scanner || {};
+  const s = settings, L = s.loop || {}, st = s.strategy || {}, sc = s.scanner || {},
+        pv = s.pivots || {};
   const perList = profiles.map(p => `<label class="check">
       <input type="checkbox" ${p.alerts ? 'checked' : ''}
         onchange="toggleProfileAlerts(${p.id}, this.checked)"> ${esc(p.name)}</label>`)
@@ -1017,6 +1244,30 @@ function renderSettings(){
 
     <h3>Alert these watchlists</h3>
     <div class="row">${perList}</div>
+
+    <h3>Pivot system</h3>
+    <p class="lede">Which pivot maths everything runs on — the Signals cards, the
+      Buy list and the Scanner all follow this setting.</p>
+    <div class="row">
+      <label for="pvSys">System</label>
+      <select id="pvSys" class="btn" onchange="saveSettings({pivot_system:this.value})">
+        ${(pv.systems || []).map(x => `<option value="${esc(x.key)}"
+          ${pv.selected === x.key ? 'selected' : ''}>${esc(x.label)}</option>`).join('')}
+      </select>
+      <span class="hint">${esc((pv.systems || []).find(x => x.key === pv.selected)?.note || '')}</span>
+    </div>
+    <div class="row">
+      <label>Band / breakout</label>
+      <span class="hint">Contraction is measured on
+        <b>${esc((pv.systems || []).find(x => x.key === pv.selected)?.band || '—')}</b>,
+        and the Buy list triggers above
+        <b>${esc(((pv.systems || []).find(x => x.key === pv.selected)?.breakout || []).join(' / ') || '—')}</b>.</span>
+    </div>
+    ${pv.selected !== 'camarilla' ? `<p class="lede" style="color:var(--brass)">
+      Note: your Chartink scan is Camarilla — its <b>0.275</b> is this system's
+      R3/S3 coefficient. On ${esc((pv.systems || []).find(x => x.key === pv.selected)?.label || '')}
+      the Scanner still finds bands closing in on both sides, but the results
+      will no longer match Chartink.</p>` : ''}
 
     <h3>Contraction scanner</h3>
     <p class="lede">The universe and filters the Scanner tab runs over.</p>
