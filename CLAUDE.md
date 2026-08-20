@@ -131,12 +131,18 @@ the README for the recovery command if a pull ever removes it.
 - **Caps are settings, not constants.** Watchlists (10) and stocks per watchlist
   (30) are rows in `settings`, editable from the Settings page, enforced
   server-side. The env vars are starting values only.
+- **`seed_users()` fills in missing accounts, one by one.** It used to bail if
+  the table had any rows, which meant adding a name to `SEED_USERS` only worked
+  on a brand new database. It now checks per user, so a new seed account
+  appears on the next restart of an existing database. It never touches an
+  existing row, so a changed password is not reset — but deleting a seeded user
+  brings it back unless you also remove it from `SEED_USERS`.
 - **A symbol's first sighting never alerts.** It is logged silently, so adding
   thirty stocks doesn't fire thirty messages.
 - **The bot token is never returned by the API in full** — `/api/settings` sends
   back only the last four characters.
-- **The login is a gate over shared data, by explicit decision.** Two seeded
-  users (`pnk`, `kau`, both `123`), salted+hashed, signed HMAC cookie, everything
+- **The login is a gate over shared data, by explicit decision.** Three seeded
+  users (`pnk`, `kau`, `kaushik`, all `123`), salted+hashed, signed HMAC cookie, everything
   under `/api/` closed except health/login/me. The owner asked for exactly this
   and moved real accounts to the backlog — don't gold-plate it unasked.
 - **GitHub Pages cannot host this** (static only, no Python). The owner tried;

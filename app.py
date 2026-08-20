@@ -325,7 +325,7 @@ def save_settings(values: Dict[str, str]) -> None:
 # data yet. Those are the backlog item.
 # ----------------------------------------------------------------------------
 
-SEED_USERS = {"pnk": "123", "kau": "123"}
+SEED_USERS = {"pnk": "123", "kau": "123", "kaushik": "123"}
 SESSION_COOKIE = "pivotdesk_session"
 SESSION_DAYS = 30
 OPEN_PATHS = {"/api/health", "/api/login", "/api/me"}
@@ -337,11 +337,24 @@ def hash_password(password: str, salt: str) -> str:
 
 
 def seed_users() -> None:
+    """
+    Create any seed account that isn't in the database yet.
+
+    Checked per user rather than "is the table empty", so adding a name to
+    SEED_USERS creates it on the next restart of an EXISTING database instead
+    of only on a brand new one.
+
+    Existing accounts are never touched, so this cannot reset a password that
+    has been changed. The trade-off is that deleting a seeded user brings it
+    back on the next restart - to remove someone for good, take them out of
+    SEED_USERS as well.
+    """
     with db() as conn:
-        if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]:
-            return
+        have = {r["username"] for r in conn.execute("SELECT username FROM users")}
         now = datetime.now().isoformat()
         for name, password in SEED_USERS.items():
+            if name in have:
+                continue
             salt = secrets.token_hex(16)
             conn.execute(
                 "INSERT INTO users (username, salt, pw_hash, created_at) VALUES (?,?,?,?)",

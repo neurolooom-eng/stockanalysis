@@ -59,10 +59,11 @@ Three independent tests, each contributing to a score from −3 to +3:
 |---|---|---|
 | Trend | price > MA20 > MA50 | price < MA20 < MA50 |
 | Volume | price above session VWAP | price below session VWAP |
-| Pivot | broken above H3 | broken below L3 |
+| Pivot | broken above the band | broken below the band |
 
 Partial credit (±0.5) for weaker versions of each. **BUY** at +2 or above,
-**SELL** at −2 or below, otherwise **HOLD**.
+**SELL** at −2 or below, otherwise **HOLD**. "The band" is R3/S3 on Camarilla,
+TC/BC on CPR and R1/S1 elsewhere — see *Choosing a pivot system* below.
 
 Camarilla levels come from the **previous completed session's** high/low/close,
 which is how pivots are meant to be used — yesterday's range defines today's
@@ -87,18 +88,22 @@ MA20 is roughly the last 100 minutes, not 20 days.
 
 ## Signing in
 
-Two accounts ship with the app:
+Three accounts ship with the app:
 
 | User | Password |
 |---|---|
 | `pnk` | `123` |
 | `kau` | `123` |
+| `kaushik` | `123` |
 
-They are created the first time the app starts with an empty database, and the
-passwords are salted and hashed rather than kept as typed. The sign-in lasts 30
+Each one is created on startup if it isn't in the database already, so adding a
+name to `SEED_USERS` in `app.py` gives you that account on the next restart —
+you don't need a fresh database. Existing accounts are never touched, so a
+password you have changed is not reset by a restart. Passwords are salted and
+hashed rather than kept as typed. The sign-in lasts 30
 days per device; **sign out** is next to the watchlist tabs.
 
-This is a **gate, not an identity system.** Both accounts see the same
+This is a **gate, not an identity system.** Every account sees the same
 watchlists and the same settings. There is no password-change screen, no
 lockout after repeated guesses, and `123` is a password in name only — change it
 before this is reachable from the open internet by anything you care about.
