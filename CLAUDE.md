@@ -91,6 +91,12 @@ the README for the recovery command if a pull ever removes it.
   `RENDER_GIT_COMMIT` on Render, else `git rev-parse`, else app.py's mtime. It
   is served from `/api/health`, which is outside the login gate on purpose, so
   the owner can check which version is live without signing in.
+- **The Buy list sorts on `room_pct`, most room first** — the owner's explicit
+  ordering. It is stored, not derived at render time, so the SQL can sort on
+  it. Names through the top level have negative room and fall to the bottom by
+  themselves. This is deliberately *not* the same as sorting by `above_pct`:
+  the R3→R4 gap scales with the previous day's range, so the two orderings
+  genuinely disagree across stocks. Don't "simplify" one into the other.
 - **The Buy list groups are a slice of the same data, not a second scan.** Rows
   are tagged with the highest breakout level price has cleared, so "broke R3
   but not R4" is just the rows tagged R3 — filtered client-side, no extra Yahoo

@@ -839,9 +839,12 @@ async function buysToWatchlist(){
    and this is the distance to it. Once it is through, there is no level left
    above to measure against. */
 function roomTo(b){
-  if(!b.h4 || b.h4 <= b.price) return '<span class="open">past it</span>';
-  const pct = (b.h4 - b.price) / b.price * 100;
-  return `<span class="open">+${pct.toFixed(2)}%</span>`;
+  // The server computes and stores this, and sorts on it. Fall back to working
+  // it out here only for rows written before the column existed.
+  const pct = (b.room_pct != null) ? b.room_pct
+    : (b.h4 && b.price ? (b.h4 - b.price) / b.price * 100 : null);
+  if(pct == null || pct <= 0) return '<span class="open">past it</span>';
+  return `<b class="up">+${pct.toFixed(2)}%</b>`;
 }
 
 function renderBuys(){
@@ -943,11 +946,11 @@ function renderBuys(){
       selected, so what you see is what goes on. They are added in the order shown,
       so if there are more than a watchlist holds, the freshest breaks go on first
       and the rest are reported rather than dropped quietly.</p>
-    <p class="lede"><b>Sorted by how recently it broke, not how far it has run.</b>
-      A stock 0.1% over R3 has just crossed; one 4% over crossed a while ago and
-      the move you would be buying has largely happened. <b>coiled</b> marks names
-      that are also contracting — a break out of a coil is the more interesting of
-      the two. Yahoo data is delayed and this places no orders.</p>
+    <p class="lede"><b>Sorted by how much room is left to ${esc(topLevel)}</b> —
+      furthest still to run at the top. Names already through ${esc(topLevel)}
+      have no room left to measure and sit at the bottom. <b>coiled</b> marks
+      names that are also contracting — a break out of a coil is the more
+      interesting of the two. Yahoo data is delayed and this places no orders.</p>
   </section>`;
 }
 

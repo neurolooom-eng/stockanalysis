@@ -230,6 +230,7 @@ def init_db():
                 level_name  TEXT NOT NULL,
                 level_price REAL NOT NULL,
                 above_pct   REAL NOT NULL,
+                room_pct    REAL,
                 h3          REAL NOT NULL,
                 h4          REAL NOT NULL,
                 pp          REAL NOT NULL,
@@ -252,6 +253,9 @@ def init_db():
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(profiles)")}
         if "alerts" not in cols:
             conn.execute("ALTER TABLE profiles ADD COLUMN alerts INTEGER NOT NULL DEFAULT 1")
+        bcols = {r["name"] for r in conn.execute("PRAGMA table_info(breakouts)")}
+        if bcols and "room_pct" not in bcols:
+            conn.execute("ALTER TABLE breakouts ADD COLUMN room_pct REAL")
 
 
 # ----------------------------------------------------------------------------
@@ -1516,6 +1520,10 @@ def scan_breakouts(exchange: str = "NSE") -> Dict:
             "level_name": level_name,
             "level_price": round(level_price, 2),
             "above_pct": round((price - level_price) / level_price * 100, 2),
+            # Distance still to run to the top level. Negative once price is
+            # through it, which is what pushes those names to the bottom.
+            "room_pct": (round((piv[hi_key] - price) / price * 100, 2)
+                         if hi_key in piv and price else None),
             # Stored as h3/h4 whatever this system calls the two levels.
             "h3": round(piv[lo_key], 2), "h4": round(piv[hi_key], 2),
             "h3_name": pretty_level(lo_key), "h4_name": pretty_level(hi_key),
@@ -1525,20 +1533,22 @@ def scan_breakouts(exchange: str = "NSE") -> Dict:
             "basis": basis,
         })
 
-    # The higher level first, and within each the freshest break - a stock
-    # barely over the level has not already made the move you would be buying.
-    top_name = pretty_level(breakout_keys[-1])
-    hits.sort(key=lambda h: (h["level_name"] != top_name, h["above_pct"]))
+    # Most room left to the top level first. That is the owner's ordering: the
+    # stock with the furthest still to run to the next level is the one worth
+    # looking at, and names already through it have negative room so they fall
+    # to the bottom on their own.
+    hits.sort(key=lambda h: -(h["room_pct"] if h["room_pct"] is not None else -999))
 
     with db() as conn:
         for h in hits:
             conn.execute(
                 "INSERT OR REPLACE INTO breakouts (symbol, exchange, scanned_at,"
-                " price, level_name, level_price, above_pct, h3, h4, pp, coiled,"
-                " turnover_cr) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                " price, level_name, level_price, above_pct, room_pct, h3, h4,"
+                " pp, coiled, turnover_cr) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (h["symbol"], h["exchange"], scanned_at, h["price"],
-                 h["level_name"], h["level_price"], h["above_pct"], h["h3"],
-                 h["h4"], h["pp"], int(h["coiled"]), h["turnover_cr"]))
+                 h["level_name"], h["level_price"], h["above_pct"],
+                 h["room_pct"], h["h3"], h["h4"], h["pp"], int(h["coiled"]),
+                 h["turnover_cr"]))
 
     return {"scanned": len(universe), "buys": hits, "skipped_illiquid": skipped,
             "failed": failed, "scanned_at": scanned_at,
@@ -2278,14 +2288,16 @@ def buylist_run(exchange: str = "NSE"):
 def buylist_read(limit: int = 200):
     system = pivot_system()
     breakout_keys = PIVOT_SYSTEMS[system]["breakout"]
-    top_name = pretty_level(breakout_keys[-1])
     with db() as conn:
         last = conn.execute(
             "SELECT MAX(scanned_at) AS t FROM breakouts").fetchone()["t"]
+        # Most room to the top level first; names already through it have
+        # negative room and sort to the bottom. NULL (rows written before
+        # room_pct existed) sorts last rather than first.
         rows = conn.execute(
             "SELECT * FROM breakouts WHERE scanned_at=?"
-            " ORDER BY (level_name=?) DESC, above_pct ASC LIMIT ?",
-            (last, top_name, limit)).fetchall() if last else []
+            " ORDER BY room_pct IS NULL, room_pct DESC LIMIT ?",
+            (last, limit)).fetchall() if last else []
     buys = [dict(r) for r in rows]
     for b in buys:
         b["coiled"] = bool(b["coiled"])

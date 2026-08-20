@@ -245,10 +245,15 @@ This is **not** filtered to contracting stocks. Any F&O name above R3 appears.
 Names that are *also* contracting get a **coiled** chip, because a break out of a
 coil is the more interesting of the two.
 
-**The list is sorted by how recently a stock broke, not how far it has run.** A
-stock 0.1% over R3 has just crossed. One 4% over crossed a while ago, and the
-move you would be buying has largely already happened. R4 names sort above R3
-names, and within each the freshest break is at the top.
+**The list is sorted by how much room is left to R4** — furthest still to run at
+the top. Names already through R4 have no room left to measure and fall to the
+bottom.
+
+That is deliberately not the same as sorting by how recently a stock broke.
+The R3→R4 gap is proportional to the previous day's range, so it differs from
+stock to stock: a name barely over R3 on a narrow-range stock can have *less*
+room ahead of it than one further above R3 on a wide-range stock. Room is the
+one that answers "how much is left in this move".
 
 Each row shows the price, which level it cleared and at what price, how far above
 it is, both R3 and R4 for context, and the stock's average turnover.
