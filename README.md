@@ -148,6 +148,85 @@ saved.
 
 ---
 
+## Choosing a pivot system
+
+**Settings → Pivot system** picks the maths everything runs on. The Signals
+cards, the Buy list, the Scanner and the chart all follow it.
+
+| System | Central pivot | What it gives you |
+|---|---|---|
+| **Camarilla** (default) | (H+L+C)/3 | R1–R4 and S1–S4, tight around the close |
+| **Classic** | (H+L+C)/3 | R1–R3 and S1–S3, spread much wider |
+| **Fibonacci** | (H+L+C)/3 | Levels at 38.2%, 61.8% and 100% of the range |
+| **Woodie** | (H+L+2C)/4 | Weights the previous close more heavily |
+| **DeMark** | conditional | One level each side; branches on whether the session closed above or below its open |
+| **CPR** | (H+L+C)/3 | Pivot with a TC/BC band around it |
+
+All of them use the **previous completed session's** high, low and close (DeMark
+also needs the open). Levels are named **R** and **S** throughout — Camarilla
+calls them H and L internally, but Kite, Chartink and every trader say R3 and
+S3, so that is what the app shows.
+
+Two things change with the system:
+
+- **The band** — the two levels the contraction test compares between bars.
+  Camarilla uses R3/S3, CPR uses TC/BC, the rest use R1/S1.
+- **The breakout levels** — what the Buy list triggers on. Camarilla R3 and R4,
+  Classic and Fibonacci R2 and R3, Woodie R1 and R2, DeMark and CPR just the one.
+
+### A warning about the Scanner
+
+Your Chartink scan is **Camarilla** — its `0.275` is that system's R3/S3
+coefficient. Switch to anything else and the Scanner still does the honest
+thing (finds bands closing in on both sides), but **it stops matching
+Chartink**. The Scanner page says so in amber whenever a non-Camarilla system is
+selected, so you can't lose track of it by accident.
+
+CPR is the interesting one to try. A *narrow* CPR is traditionally read as a
+trending day coming and a wide one as sideways — the same instinct as the
+contraction scan, measured a different way.
+
+---
+
+## Charts
+
+Click any symbol — on a Signals card, in the Buy list, or in the Scanner — to
+open a candlestick chart with your pivot levels drawn across it. **5m**, **15m**
+and **Daily** are the available intervals.
+
+The levels come from the previous completed session whatever interval you pick,
+so the lines don't move as you switch timeframe. That is how pivots work and how
+Kite plots them. Solid lines are the band, dashed are the rest; where levels sit
+too close to label legibly the line is still drawn but the label is dropped, band
+and PP first.
+
+This is drawn as plain SVG with no charting library, deliberately — the app is
+four files with no build step, and a CDN or npm dependency would end that. So it
+is a chart for seeing where price sits against your levels, not a trading
+terminal. No drawing tools, no pan and zoom, and **Yahoo's data is delayed**, so
+it will not tick along with Kite.
+
+---
+
+## Knowing which version you are on
+
+The footer shows a build stamp:
+
+```
+Build 341890b · code 20 Aug, 09:00 · running since 20 Aug, 09:02
+```
+
+- **Build** is the git commit when it can find one. On Render that comes from
+  the deploy itself, so it tells you exactly which commit is live.
+- **code** is when `app.py` last changed.
+- **running since** is when the server started.
+
+If you have just pushed a change and the build stamp hasn't moved, you are
+looking at an old deploy or a cached page — hard-refresh with `Ctrl+F5`. It is
+visible before you sign in, so you can check it without logging in.
+
+---
+
 ## Buy list
 
 The **Buy list** view screens the whole F&O list for stocks trading **above R3**,

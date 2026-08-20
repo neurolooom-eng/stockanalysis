@@ -48,6 +48,10 @@ INTRADAY_INTERVAL = os.environ.get("INTERVAL", "5m")  # 1m/2m/5m/15m/30m/60m
 MA_FAST = int(os.environ.get("MA_FAST", 20))          # in bars, not days
 MA_SLOW = int(os.environ.get("MA_SLOW", 50))
 
+# Which pivot system the app runs on unless the setting says otherwise.
+# Declared here because SETTING_DEFAULTS below needs it.
+DEFAULT_PIVOT = "camarilla"
+
 IST = ZoneInfo("Asia/Kolkata")
 MARKET_OPEN = dtime(9, 15)
 MARKET_CLOSE = dtime(15, 30)
@@ -60,6 +64,65 @@ _log_lock = threading.Lock()   # guards the read-then-write in score_profile()
 # background loop is actually running, and why it last failed if it did.
 _alert_state: Dict[str, Optional[str]] = {
     "last_run": None, "last_sent": None, "last_error": None, "running": False}
+
+
+# ----------------------------------------------------------------------------
+# Build stamp
+#
+# Shown in the footer so you can tell at a glance whether the page you are
+# looking at is the latest deploy, or a cached copy of an older one.
+# ----------------------------------------------------------------------------
+
+STARTED_AT = datetime.now(ZoneInfo("Asia/Kolkata"))
+
+
+def build_id() -> str:
+    """
+    Short identifier for the running code.
+
+    Render sets RENDER_GIT_COMMIT, so on the hosted copy this is the real
+    commit. Locally it falls back to asking git, and if that fails (no git, or
+    a copied folder) to the modification time of app.py, which still changes
+    whenever the code does.
+    """
+    commit = (os.environ.get("RENDER_GIT_COMMIT")
+              or os.environ.get("SOURCE_VERSION")   # some hosts use this name
+              or os.environ.get("GIT_COMMIT"))
+    if commit:
+        return commit[:7]
+    try:
+        import subprocess
+        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                             cwd=str(BASE_DIR), capture_output=True,
+                             text=True, timeout=5)
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except Exception:  # noqa: BLE001 - a missing git must not break startup
+        pass
+    try:
+        stamp = datetime.fromtimestamp(
+            (BASE_DIR / "app.py").stat().st_mtime, ZoneInfo("Asia/Kolkata"))
+        return "f" + stamp.strftime("%m%d%H%M")
+    except OSError:
+        return "unknown"
+
+
+def code_changed_at() -> Optional[str]:
+    """When app.py was last modified - the honest 'version' of the code."""
+    try:
+        return datetime.fromtimestamp(
+            (BASE_DIR / "app.py").stat().st_mtime,
+            ZoneInfo("Asia/Kolkata")).isoformat()
+    except OSError:
+        return None
+
+
+def build_info() -> Dict:
+    return {
+        "build": build_id(),
+        "code_changed_at": code_changed_at(),
+        "started_at": STARTED_AT.isoformat(),
+    }
 
 
 # ----------------------------------------------------------------------------
@@ -220,6 +283,9 @@ SETTING_DEFAULTS = {
     "fno_universe": "",            # blank = FNO_SYMBOLS
     "min_turnover_cr": "50",       # skip names thinner than this (Rs crore/day)
     "rank_min_score": "0",         # hide hits ranking below this
+    # Which pivot system everything runs on. Changing it changes the score,
+    # the Scanner and the Buy list together - see PIVOT_SYSTEMS.
+    "pivot_system": DEFAULT_PIVOT,
 }
 
 
@@ -416,6 +482,191 @@ def _flatten(df: pd.DataFrame, ticker: str) -> Optional[pd.DataFrame]:
     return df.dropna(how="all")
 
 
+# ----------------------------------------------------------------------------
+# Pivot systems
+#
+# All six take the PREVIOUS completed session's H/L/C (DeMark also needs the
+# open) and return a flat dict of level name -> price.
+#
+# Every system is normalised onto the same two ideas so the rest of the app
+# doesn't have to know which one is selected:
+#
+#   band     - the two levels the contraction test compares between bars.
+#   breakout - the levels the Buy list checks price against, low to high.
+#
+# For Camarilla the band is H3/L3, which is what the Chartink filter uses.
+# For CPR it is TC/BC, the central range, whose width is read exactly the same
+# way - narrow means a trending day is expected. For the rest it is R1/S1.
+# ----------------------------------------------------------------------------
+
+PIVOT_SYSTEMS = {
+    "camarilla": {
+        "label": "Camarilla",
+        "band": ("h3", "l3"),
+        "breakout": ("h3", "h4"),
+        "order": ["l4", "l3", "l2", "l1", "pp", "h1", "h2", "h3", "h4"],
+        "note": "Chartink's 0.275 is this system's H3/L3 coefficient.",
+    },
+    "classic": {
+        "label": "Classic",
+        "band": ("r1", "s1"),
+        "breakout": ("r2", "r3"),
+        "order": ["s3", "s2", "s1", "pp", "r1", "r2", "r3"],
+        "note": "The most widely used system. Levels sit wider than Camarilla's.",
+    },
+    "fibonacci": {
+        "label": "Fibonacci",
+        "band": ("r1", "s1"),
+        "breakout": ("r2", "r3"),
+        "order": ["s3", "s2", "s1", "pp", "r1", "r2", "r3"],
+        "note": "Levels at 38.2%, 61.8% and 100% of the previous range.",
+    },
+    "woodie": {
+        "label": "Woodie",
+        "band": ("r1", "s1"),
+        "breakout": ("r1", "r2"),
+        "order": ["s2", "s1", "pp", "r1", "r2"],
+        "note": "Weights the previous close more heavily in the central pivot.",
+    },
+    "demark": {
+        "label": "DeMark",
+        "band": ("r1", "s1"),
+        "breakout": ("r1",),
+        "order": ["s1", "pp", "r1"],
+        "note": "Branches on whether the session closed above or below its open.",
+    },
+    "cpr": {
+        "label": "CPR",
+        "band": ("tc", "bc"),
+        "breakout": ("tc",),
+        "order": ["bc", "pp", "tc"],
+        "note": "A narrow CPR is read as a trending day, a wide one as sideways.",
+    },
+}
+
+
+def pretty_level(key: str) -> str:
+    """
+    What to call a level on screen.
+
+    Camarilla's levels are H1-H4 and L1-L4 internally, but everyone - Kite,
+    Chartink, the owner - says R and S. One naming scheme across all six
+    systems, so "R3" means the same thing wherever it appears.
+    """
+    if key.startswith("h") and key[1:].isdigit():
+        return "R" + key[1:]
+    if key.startswith("l") and key[1:].isdigit():
+        return "S" + key[1:]
+    return key.upper()
+
+
+def pivot_system() -> str:
+    chosen = get_settings().get("pivot_system", DEFAULT_PIVOT)
+    return chosen if chosen in PIVOT_SYSTEMS else DEFAULT_PIVOT
+
+
+def classic_pivots(high: float, low: float, close: float) -> Dict[str, float]:
+    pp = (high + low + close) / 3
+    rng = high - low
+    return {
+        "pp": pp,
+        "r1": 2 * pp - low,
+        "r2": pp + rng,
+        "r3": high + 2 * (pp - low),
+        "s1": 2 * pp - high,
+        "s2": pp - rng,
+        "s3": low - 2 * (high - pp),
+    }
+
+
+def fibonacci_pivots(high: float, low: float, close: float) -> Dict[str, float]:
+    pp = (high + low + close) / 3
+    rng = high - low
+    return {
+        "pp": pp,
+        "r1": pp + 0.382 * rng,
+        "r2": pp + 0.618 * rng,
+        "r3": pp + 1.000 * rng,
+        "s1": pp - 0.382 * rng,
+        "s2": pp - 0.618 * rng,
+        "s3": pp - 1.000 * rng,
+    }
+
+
+def woodie_pivots(high: float, low: float, close: float) -> Dict[str, float]:
+    # The close counts twice here - that is the whole point of Woodie.
+    pp = (high + low + 2 * close) / 4
+    rng = high - low
+    return {
+        "pp": pp,
+        "r1": 2 * pp - low,
+        "r2": pp + rng,
+        "s1": 2 * pp - high,
+        "s2": pp - rng,
+    }
+
+
+def demark_pivots(high: float, low: float, close: float,
+                  open_: float) -> Dict[str, float]:
+    """
+    DeMark picks its X differently depending on how the session finished, so
+    it needs the OPEN as well as H/L/C. Without an open it cannot be computed
+    and the caller falls back.
+    """
+    if close < open_:
+        x = high + 2 * low + close
+    elif close > open_:
+        x = 2 * high + low + close
+    else:
+        x = high + low + 2 * close
+    return {"pp": x / 4, "r1": x / 2 - low, "s1": x / 2 - high}
+
+
+def cpr_pivots(high: float, low: float, close: float) -> Dict[str, float]:
+    """
+    Central Pivot Range. TC = 2P - BC can come out BELOW BC; by convention the
+    higher of the two is plotted as the top, so they are swapped if needed.
+    """
+    pp = (high + low + close) / 3
+    bc = (high + low) / 2
+    tc = 2 * pp - bc
+    if tc < bc:
+        tc, bc = bc, tc
+    return {"pp": pp, "tc": tc, "bc": bc}
+
+
+def pivot_levels(high: float, low: float, close: float,
+                 open_: Optional[float] = None,
+                 system: Optional[str] = None) -> Dict[str, float]:
+    """Levels for the chosen system, from the previous session's bar."""
+    system = system if system in PIVOT_SYSTEMS else (system or DEFAULT_PIVOT)
+    if system == "camarilla":
+        return camarilla(high, low, close)
+    if system == "classic":
+        return classic_pivots(high, low, close)
+    if system == "fibonacci":
+        return fibonacci_pivots(high, low, close)
+    if system == "woodie":
+        return woodie_pivots(high, low, close)
+    if system == "cpr":
+        return cpr_pivots(high, low, close)
+    if system == "demark":
+        if open_ is None:
+            # No open available - Classic is the closest thing that only needs
+            # H/L/C, and the caller is told which system actually ran.
+            return classic_pivots(high, low, close)
+        return demark_pivots(high, low, close, open_)
+    return camarilla(high, low, close)
+
+
+def band_of(levels: Dict[str, float], system: str) -> Optional[tuple]:
+    """The (upper, lower) prices the contraction test compares."""
+    up, dn = PIVOT_SYSTEMS[system]["band"]
+    if up not in levels or dn not in levels:
+        return None
+    return levels[up], levels[dn]
+
+
 def camarilla(high: float, low: float, close: float) -> Dict[str, float]:
     """
     Camarilla levels from the PREVIOUS session's high/low/close.
@@ -460,11 +711,16 @@ def session_vwap(intraday: pd.DataFrame) -> Optional[float]:
     return float((tp * vol).sum() / vol.sum())
 
 
-def score_signal(price, ma_fast, ma_slow, vwap, piv):
+def score_signal(price, ma_fast, ma_slow, vwap, piv, system=None):
     """
     Transparent additive score in [-3, +3]. Every component is reported so
     you can see WHY a signal fired instead of trusting a bare number.
+
+    The pivot test uses whichever system is selected: its band's upper level
+    is the resistance and the lower one the support. On Camarilla that is
+    H3/L3, on CPR it is TC/BC, elsewhere R1/S1.
     """
+    system = system if system in PIVOT_SYSTEMS else DEFAULT_PIVOT
     score, reasons = 0.0, []
 
     # 1. Trend (moving averages)
@@ -494,18 +750,23 @@ def score_signal(price, ma_fast, ma_slow, vwap, piv):
             reasons.append(("vwap", -1, "Trading below session VWAP"))
 
     # 3. Pivot position
-    if price > piv["h3"]:
-        score += 1
-        reasons.append(("pivot", 1, "Broken above H3 resistance"))
-    elif price < piv["l3"]:
-        score -= 1
-        reasons.append(("pivot", -1, "Broken below L3 support"))
-    elif price > piv["pp"]:
-        score += 0.5
-        reasons.append(("pivot", 0.5, "Above central pivot, inside H3"))
-    else:
-        score -= 0.5
-        reasons.append(("pivot", -0.5, "Below central pivot, inside L3"))
+    up_key, dn_key = PIVOT_SYSTEMS[system]["band"]
+    up_name, dn_name = pretty_level(up_key), pretty_level(dn_key)
+    band = band_of(piv, system)
+    if band is not None:
+        upper, lower = band
+        if price > upper:
+            score += 1
+            reasons.append(("pivot", 1, f"Broken above {up_name} resistance"))
+        elif price < lower:
+            score -= 1
+            reasons.append(("pivot", -1, f"Broken below {dn_name} support"))
+        elif price > piv["pp"]:
+            score += 0.5
+            reasons.append(("pivot", 0.5, f"Above central pivot, inside {up_name}"))
+        else:
+            score -= 0.5
+            reasons.append(("pivot", -0.5, f"Below central pivot, inside {dn_name}"))
 
     if score >= 2:
         signal = "BUY"
@@ -519,7 +780,9 @@ def score_signal(price, ma_fast, ma_slow, vwap, piv):
 
 def analyse(symbol: str, exchange: str) -> Dict:
     ticker = yahoo_symbol(symbol, exchange)
-    key = f"{ticker}|{INTRADAY_INTERVAL}"
+    # The pivot system is part of the key: switching it must not serve back a
+    # result computed against the old levels.
+    key = f"{ticker}|{INTRADAY_INTERVAL}|{pivot_system()}"
     hit = _cache.get(key)
     if hit and time.time() - hit[0] < CACHE_TTL_SECONDS:
         return hit[1]
@@ -539,7 +802,10 @@ def analyse(symbol: str, exchange: str) -> Dict:
 
         # Previous completed session drives the pivots.
         prev = daily.iloc[-2]
-        piv = camarilla(float(prev["High"]), float(prev["Low"]), float(prev["Close"]))
+        system = pivot_system()
+        prev_open = float(prev["Open"]) if "Open" in daily.columns else None
+        piv = pivot_levels(float(prev["High"]), float(prev["Low"]),
+                           float(prev["Close"]), prev_open, system)
 
         last_close = None
         if intra is not None and len(intra) >= 2:
@@ -564,7 +830,8 @@ def analyse(symbol: str, exchange: str) -> Dict:
             as_of = daily.index[-1].isoformat()
             basis = "daily bars (no intraday data)"
 
-        signal, score, confidence, reasons = score_signal(price, ma_fast, ma_slow, vwap, piv)
+        signal, score, confidence, reasons = score_signal(
+            price, ma_fast, ma_slow, vwap, piv, system)
         prev_close = float(daily["Close"].iloc[-2])
 
         out.update({
@@ -581,8 +848,14 @@ def analyse(symbol: str, exchange: str) -> Dict:
             "ma_slow_period": MA_SLOW,
             "vwap": round(vwap, 2) if vwap is not None else None,
             "last_close": round(last_close, 2) if last_close is not None else None,
-            "band_pct": round(band_pct(piv, price), 2) if price else None,
+            "band_pct": round(band_pct(piv, price, system), 2) if price else None,
             "pivots": {k: round(v, 2) for k, v in piv.items()},
+            "pivot_system": system,
+            "pivot_label": PIVOT_SYSTEMS[system]["label"],
+            # Low to high, so the UI can draw the ladder without knowing which
+            # system produced it.
+            "pivot_order": [k for k in PIVOT_SYSTEMS[system]["order"] if k in piv],
+            "pivot_band": list(PIVOT_SYSTEMS[system]["band"]),
             "as_of": as_of,
             "basis": basis,
         })
@@ -749,12 +1022,18 @@ def strategy_config() -> Dict:
     }
 
 
-def band_pct(pivots: Dict[str, float], price: float) -> Optional[float]:
-    """Width of the H3-L3 band as a percentage of price. The narrower it is,
-    the more the stock has coiled up against yesterday's range."""
+def band_pct(pivots: Dict[str, float], price: float,
+             system: Optional[str] = None) -> Optional[float]:
+    """Width of the selected system's band as a percentage of price. The
+    narrower it is, the more the stock has coiled up against yesterday's
+    range. On CPR this is the classic narrow-vs-wide CPR read."""
     if not price:
         return None
-    return (pivots["h3"] - pivots["l3"]) / price * 100
+    band = band_of(pivots, system if system in PIVOT_SYSTEMS else DEFAULT_PIVOT)
+    if band is None:
+        return None
+    upper, lower = band
+    return (upper - lower) / price * 100
 
 
 def run_scan(exchange: str = "NSE") -> Dict:
@@ -770,14 +1049,23 @@ def run_scan(exchange: str = "NSE") -> Dict:
         if "error" in r:
             failed.append({"symbol": r["symbol"], "error": r["error"]})
             continue
-        width = band_pct(r["pivots"], r["price"])
+        system = r.get("pivot_system", DEFAULT_PIVOT)
+        width = band_pct(r["pivots"], r["price"], system)
         if width is None or width > cfg["band_max_pct"]:
+            continue
+        # The strategy's trigger is named h3/h4, which only exist on Camarilla.
+        # On any other system fall back to that system's top breakout level so
+        # the strategy keeps working rather than raising.
+        level_key = cfg["level"]
+        if level_key not in r["pivots"]:
+            level_key = PIVOT_SYSTEMS[system]["breakout"][-1]
+        if level_key not in r["pivots"]:
             continue
         found.append({
             "symbol": r["symbol"], "exchange": exchange,
             "band_pct": round(width, 2),
-            "level_name": cfg["level"].upper(),
-            "level_price": r["pivots"][cfg["level"]],
+            "level_name": pretty_level(level_key),
+            "level_price": r["pivots"][level_key],
             "price": r["price"],
         })
 
@@ -866,35 +1154,55 @@ def completed_bars(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
     return df.iloc[:-1] if market_is_open() else df
 
 
-def bar_camarilla(bar) -> Dict[str, float]:
-    return camarilla(float(bar["High"]), float(bar["Low"]), float(bar["Close"]))
+def bar_pivots(bar, system: Optional[str] = None) -> Dict[str, float]:
+    """Pivot levels from one bar, in whichever system is selected."""
+    open_ = float(bar["Open"]) if "Open" in bar.index else None
+    return pivot_levels(float(bar["High"]), float(bar["Low"]),
+                        float(bar["Close"]), open_, system or pivot_system())
 
 
-def is_contraction(cur: Dict[str, float], prev: Dict[str, float]) -> bool:
-    """The Chartink test: this band sits strictly inside the previous one."""
-    return cur["h3"] < prev["h3"] and cur["l3"] > prev["l3"]
+def is_contraction(cur: Dict[str, float], prev: Dict[str, float],
+                   system: Optional[str] = None) -> bool:
+    """
+    The Chartink test: this band sits strictly inside the previous one.
+
+    On Camarilla the band is H3/L3, which is exactly what Chartink compares.
+    On any other system it is that system's band, so the scan still means
+    "the band closed in on both sides" - but it stops matching Chartink.
+    """
+    system = system if system in PIVOT_SYSTEMS else DEFAULT_PIVOT
+    a, b = band_of(cur, system), band_of(prev, system)
+    if a is None or b is None:
+        return False
+    return a[0] < b[0] and a[1] > b[1]
 
 
-def contraction_depth(cur: Dict[str, float], prev: Dict[str, float]) -> float:
+def contraction_depth(cur: Dict[str, float], prev: Dict[str, float],
+                      system: Optional[str] = None) -> float:
     """How much tighter the band got, as a % of the previous band's width."""
-    prev_width = prev["h3"] - prev["l3"]
+    system = system if system in PIVOT_SYSTEMS else DEFAULT_PIVOT
+    a, b = band_of(cur, system), band_of(prev, system)
+    if a is None or b is None:
+        return 0.0
+    prev_width = b[0] - b[1]
     if prev_width <= 0:
         return 0.0
-    return (prev_width - (cur["h3"] - cur["l3"])) / prev_width * 100
+    return (prev_width - (a[0] - a[1])) / prev_width * 100
 
 
-def contraction_streak(df: pd.DataFrame) -> int:
+def contraction_streak(df: pd.DataFrame, system: Optional[str] = None) -> int:
     """
     How many bars in a row, counting back from the last one, contracted.
 
     A band that has narrowed three sessions running is a tighter spring than
     one that only narrowed today, so this feeds the rank.
     """
+    system = system or pivot_system()
     streak = 0
     for i in range(len(df) - 1, 0, -1):
-        cur = bar_camarilla(df.iloc[i])
-        prev = bar_camarilla(df.iloc[i - 1])
-        if not is_contraction(cur, prev):
+        cur = bar_pivots(df.iloc[i], system)
+        prev = bar_pivots(df.iloc[i - 1], system)
+        if not is_contraction(cur, prev, system):
             break
         streak += 1
     return streak
@@ -1028,6 +1336,7 @@ def scan_contraction(timeframe: str = "1d", exchange: str = "NSE") -> Dict:
     cfg = scanner_config()
     universe = cfg["universe"]
 
+    system = pivot_system()
     frames = batch_history(universe, exchange, period, interval)
     scanned_at = datetime.now(IST).isoformat()
     hits, skipped, failed = [], 0, []
@@ -1043,14 +1352,14 @@ def scan_contraction(timeframe: str = "1d", exchange: str = "NSE") -> Dict:
             continue
 
         try:
-            cur = bar_camarilla(df.iloc[-1])
-            prev = bar_camarilla(df.iloc[-2])
+            cur = bar_pivots(df.iloc[-1], system)
+            prev = bar_pivots(df.iloc[-2], system)
             price = float(df["Close"].iloc[-1])
         except (KeyError, ValueError, TypeError):
             failed.append(sym)
             continue
 
-        if not is_contraction(cur, prev):
+        if not is_contraction(cur, prev, system):
             continue
 
         turnover = avg_turnover_cr(df)
@@ -1058,19 +1367,23 @@ def scan_contraction(timeframe: str = "1d", exchange: str = "NSE") -> Dict:
             skipped += 1
             continue
 
-        depth = contraction_depth(cur, prev)
-        streak = contraction_streak(df)
+        depth = contraction_depth(cur, prev, system)
+        streak = contraction_streak(df, system)
         score, rules = rank_hit(df, depth, streak)
         if score < cfg["rank_min_score"]:
             continue
 
+        # h3/l3 are the stored column names for the band, whatever the system
+        # actually calls those two levels.
+        (cur_up, cur_dn) = band_of(cur, system)
+        (prev_up, prev_dn) = band_of(prev, system)
         hits.append({
             "symbol": sym, "exchange": exchange, "timeframe": timeframe,
             "bar_at": df.index[-1].isoformat(),
             "price": round(price, 2),
-            "h3": round(cur["h3"], 2), "l3": round(cur["l3"], 2),
-            "prev_h3": round(prev["h3"], 2), "prev_l3": round(prev["l3"], 2),
-            "band_pct": round((cur["h3"] - cur["l3"]) / price * 100, 2) if price else 0,
+            "h3": round(cur_up, 2), "l3": round(cur_dn, 2),
+            "prev_h3": round(prev_up, 2), "prev_l3": round(prev_dn, 2),
+            "band_pct": round((cur_up - cur_dn) / price * 100, 2) if price else 0,
             "depth_pct": round(depth, 2),
             "streak": streak,
             "turnover_cr": round(turnover, 1) if turnover is not None else None,
@@ -1102,6 +1415,9 @@ def scan_contraction(timeframe: str = "1d", exchange: str = "NSE") -> Dict:
         "failed": failed,
         "scanned_at": scanned_at,
         "bars_complete_only": market_is_open(),
+        "pivot_system": system,
+        "pivot_label": PIVOT_SYSTEMS[system]["label"],
+        "band_label": "/".join(pretty_level(k) for k in PIVOT_SYSTEMS[system]["band"]),
     }
 
 
@@ -1124,6 +1440,11 @@ def scan_breakouts(exchange: str = "NSE") -> Dict:
     cfg = scanner_config()
     universe = cfg["universe"]
 
+    system = pivot_system()
+    # Levels this system treats as a break, low to high. Camarilla has two
+    # (H3 then H4); DeMark and CPR have only one.
+    breakout_keys = PIVOT_SYSTEMS[system]["breakout"]
+
     daily = batch_history(universe, exchange, "3mo", "1d")
     intra = batch_history(universe, exchange, "5d", INTRADAY_INTERVAL)
 
@@ -1139,8 +1460,7 @@ def scan_breakouts(exchange: str = "NSE") -> Dict:
             # Same convention as analyse(): the bar behind the latest daily one
             # is the previous completed session, and it sets today's levels.
             prev = d.iloc[-2]
-            piv = camarilla(float(prev["High"]), float(prev["Low"]),
-                            float(prev["Close"]))
+            piv = bar_pivots(prev, system)
 
             live = intra.get(sym)
             if live is not None and not live.empty:
@@ -1153,7 +1473,9 @@ def scan_breakouts(exchange: str = "NSE") -> Dict:
             failed.append(sym)
             continue
 
-        if price <= piv["h3"]:
+        # The highest breakout level price has cleared, if any.
+        cleared = [k for k in breakout_keys if k in piv and price > piv[k]]
+        if not cleared:
             continue
 
         turnover = avg_turnover_cr(d)
@@ -1161,16 +1483,19 @@ def scan_breakouts(exchange: str = "NSE") -> Dict:
             skipped += 1
             continue
 
-        above_h4 = price > piv["h4"]
-        level_name = "R4" if above_h4 else "R3"
-        level_price = piv["h4"] if above_h4 else piv["h3"]
+        top = cleared[-1]
+        level_name = pretty_level(top)
+        level_price = piv[top]
+        # The lowest breakout level, reported as context on every row.
+        lo_key = breakout_keys[0]
+        hi_key = breakout_keys[-1]
 
         # Is it also coiled? Cheap to answer - the daily bars are already here.
         coiled = False
         bars = completed_bars(d)
         if bars is not None and len(bars) >= 2:
-            coiled = is_contraction(bar_camarilla(bars.iloc[-1]),
-                                    bar_camarilla(bars.iloc[-2]))
+            coiled = is_contraction(bar_pivots(bars.iloc[-1], system),
+                                    bar_pivots(bars.iloc[-2], system), system)
 
         hits.append({
             "symbol": sym, "exchange": exchange,
@@ -1178,16 +1503,19 @@ def scan_breakouts(exchange: str = "NSE") -> Dict:
             "level_name": level_name,
             "level_price": round(level_price, 2),
             "above_pct": round((price - level_price) / level_price * 100, 2),
-            "h3": round(piv["h3"], 2), "h4": round(piv["h4"], 2),
+            # Stored as h3/h4 whatever this system calls the two levels.
+            "h3": round(piv[lo_key], 2), "h4": round(piv[hi_key], 2),
+            "h3_name": pretty_level(lo_key), "h4_name": pretty_level(hi_key),
             "pp": round(piv["pp"], 2),
             "coiled": coiled,
             "turnover_cr": round(turnover, 1) if turnover is not None else None,
             "basis": basis,
         })
 
-    # R4 above R3, and within each the freshest break first - a stock barely
-    # over the level has not already made the move you would be buying.
-    hits.sort(key=lambda h: (h["level_name"] != "R4", h["above_pct"]))
+    # The higher level first, and within each the freshest break - a stock
+    # barely over the level has not already made the move you would be buying.
+    top_name = pretty_level(breakout_keys[-1])
+    hits.sort(key=lambda h: (h["level_name"] != top_name, h["above_pct"]))
 
     with db() as conn:
         for h in hits:
@@ -1201,7 +1529,10 @@ def scan_breakouts(exchange: str = "NSE") -> Dict:
 
     return {"scanned": len(universe), "buys": hits, "skipped_illiquid": skipped,
             "failed": failed, "scanned_at": scanned_at,
-            "market_open": market_is_open()}
+            "market_open": market_is_open(),
+            "pivot_system": system,
+            "pivot_label": PIVOT_SYSTEMS[system]["label"],
+            "levels": [pretty_level(k) for k in breakout_keys]}
 
 
 def open_trade(cand: Dict, quote: Dict, reason: str, cfg: Dict) -> Dict:
@@ -1458,6 +1789,7 @@ class SettingsIn(BaseModel):
     fno_universe: Optional[str] = None
     min_turnover_cr: Optional[float] = None
     rank_min_score: Optional[float] = None
+    pivot_system: Optional[str] = None
 
 
 class AlertsIn(BaseModel):
@@ -1522,7 +1854,8 @@ def index():
 @app.get("/api/health")
 def health():
     return {"status": "ok", "time": datetime.now().isoformat(),
-            "interval": INTRADAY_INTERVAL, "cache_ttl": CACHE_TTL_SECONDS}
+            "interval": INTRADAY_INTERVAL, "cache_ttl": CACHE_TTL_SECONDS,
+            **build_info()}
 
 
 @app.get("/api/symbols")
@@ -1732,6 +2065,13 @@ def read_settings():
             "scan_universe": cfg["scan_universe"],
             "universe_size": len(strategy_config()["universe"]),
         },
+        "pivots": {
+            "selected": pivot_system(),
+            "systems": [{"key": k, "label": v["label"], "note": v["note"],
+                         "band": "/".join(pretty_level(x) for x in v["band"]),
+                         "breakout": [pretty_level(x) for x in v["breakout"]]}
+                        for k, v in PIVOT_SYSTEMS.items()],
+        },
         "scanner": {
             "scan_source": cfg.get("scan_source", "fno"),
             "fno_universe": cfg.get("fno_universe", ""),
@@ -1818,6 +2158,7 @@ def scan_read(timeframe: str = "1d", limit: int = 100):
     if timeframe not in TIMEFRAMES:
         raise HTTPException(400, f"timeframe must be one of {list(TIMEFRAMES)}")
     cfg = scanner_config()
+    system = pivot_system()
     with db() as conn:
         last = conn.execute(
             "SELECT MAX(scanned_at) AS t FROM scan_hits WHERE timeframe=?",
@@ -1841,6 +2182,76 @@ def scan_read(timeframe: str = "1d", limit: int = 100):
         "hits": hits,
         "universe_size": len(cfg["universe"]),
         "source": cfg["source"],
+        "pivot_system": system,
+        "pivot_label": PIVOT_SYSTEMS[system]["label"],
+        "band_label": "/".join(pretty_level(k) for k in PIVOT_SYSTEMS[system]["band"]),
+    }
+
+
+CHART_INTERVALS = {
+    "5m": ("5d", "5m"),
+    "15m": ("1mo", "15m"),
+    "1d": ("6mo", "1d"),
+}
+
+
+@app.get("/api/chart")
+def chart(symbol: str, exchange: str = "NSE", interval: str = "5m",
+          bars: int = 120):
+    """
+    Bars plus the pivot levels to draw across them.
+
+    The levels come from the previous completed SESSION regardless of the bar
+    interval, which is how pivots work and how Kite plots them - the lines do
+    not move as you change timeframe.
+    """
+    if interval not in CHART_INTERVALS:
+        raise HTTPException(400, f"interval must be one of {list(CHART_INTERVALS)}")
+    period, yf_interval = CHART_INTERVALS[interval]
+    ticker = yahoo_symbol(symbol, exchange)
+    system = pivot_system()
+
+    try:
+        frame = _flatten(yf.download(ticker, period=period, interval=yf_interval,
+                                     progress=False, auto_adjust=False), ticker)
+        daily = _flatten(yf.download(ticker, period="1mo", interval="1d",
+                                     progress=False, auto_adjust=False), ticker)
+    except Exception as exc:  # noqa: BLE001 - report, don't 500
+        raise HTTPException(502, f"{type(exc).__name__}: {exc}")
+
+    if frame is None or frame.empty or daily is None or len(daily) < 2:
+        raise HTTPException(404, f"No data for {symbol}")
+
+    prev = daily.iloc[-2]
+    piv = bar_pivots(prev, system)
+
+    frame = frame.tail(max(10, min(bars, 400)))
+    out = []
+    for ts, row in frame.iterrows():
+        try:
+            out.append({
+                "t": ts.isoformat(),
+                "o": round(float(row["Open"]), 2),
+                "h": round(float(row["High"]), 2),
+                "l": round(float(row["Low"]), 2),
+                "c": round(float(row["Close"]), 2),
+            })
+        except (KeyError, ValueError, TypeError):
+            continue
+
+    if not out:
+        raise HTTPException(404, f"No usable bars for {symbol}")
+
+    return {
+        "symbol": symbol.upper(), "exchange": exchange.upper(),
+        "interval": interval,
+        "bars": out,
+        "price": out[-1]["c"],
+        "pivots": {k: round(v, 2) for k, v in piv.items()},
+        "pivot_order": [k for k in PIVOT_SYSTEMS[system]["order"] if k in piv],
+        "pivot_band": list(PIVOT_SYSTEMS[system]["band"]),
+        "pivot_label": PIVOT_SYSTEMS[system]["label"],
+        "level_names": {k: pretty_level(k) for k in piv},
     }
 
 
@@ -1852,19 +2263,27 @@ def buylist_run(exchange: str = "NSE"):
 
 @app.get("/api/buylist")
 def buylist_read(limit: int = 200):
+    system = pivot_system()
+    breakout_keys = PIVOT_SYSTEMS[system]["breakout"]
+    top_name = pretty_level(breakout_keys[-1])
     with db() as conn:
         last = conn.execute(
             "SELECT MAX(scanned_at) AS t FROM breakouts").fetchone()["t"]
         rows = conn.execute(
             "SELECT * FROM breakouts WHERE scanned_at=?"
-            " ORDER BY (level_name='R4') DESC, above_pct ASC LIMIT ?",
-            (last, limit)).fetchall() if last else []
+            " ORDER BY (level_name=?) DESC, above_pct ASC LIMIT ?",
+            (last, top_name, limit)).fetchall() if last else []
     buys = [dict(r) for r in rows]
     for b in buys:
         b["coiled"] = bool(b["coiled"])
+        b["h3_name"] = pretty_level(breakout_keys[0])
+        b["h4_name"] = pretty_level(breakout_keys[-1])
     return {"scanned_at": last, "buys": buys,
             "universe_size": len(scanner_config()["universe"]),
-            "market_open": market_is_open()}
+            "market_open": market_is_open(),
+            "pivot_system": system,
+            "pivot_label": PIVOT_SYSTEMS[system]["label"],
+            "levels": [pretty_level(k) for k in breakout_keys]}
 
 
 @app.get("/api/scan/universe")
@@ -1911,6 +2330,9 @@ def write_settings(body: SettingsIn):
         updates["scan_universe"] = ",".join(
             s.strip().upper() for s in
             body.scan_universe.replace("\n", ",").split(",") if s.strip())
+    if body.pivot_system is not None and body.pivot_system in PIVOT_SYSTEMS:
+        updates["pivot_system"] = body.pivot_system
+        _cache.clear()   # levels change, so every cached quote is now stale
     if body.scan_source is not None and body.scan_source in ("fno", "starter", "custom"):
         updates["scan_source"] = body.scan_source
     if body.fno_universe is not None:
