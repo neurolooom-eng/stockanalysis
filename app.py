@@ -2302,6 +2302,7 @@ def buylist_read(limit: int = 200):
 class BuyListToWatchlist(BaseModel):
     profile_id: Optional[int] = None   # None means "make a new one"
     name: Optional[str] = None         # only used when creating
+    only_level: Optional[str] = None   # e.g. "R3" - just that group
 
 
 @app.post("/api/buylist/to-watchlist")
@@ -2318,6 +2319,14 @@ def buylist_to_watchlist(body: BuyListToWatchlist):
     buys = listing["buys"]
     if not buys:
         raise HTTPException(400, "The Buy list is empty. Run a sync first.")
+
+    # Adding while a group is selected on screen should add that group, not
+    # everything - what you see is what goes on.
+    if body.only_level:
+        want = body.only_level.strip().upper()
+        buys = [b for b in buys if b["level_name"] == want]
+        if not buys:
+            raise HTTPException(400, f"No names in the {want} group right now.")
 
     stock_cap = caps()["max_stocks_per_profile"]
     now = datetime.now().isoformat()

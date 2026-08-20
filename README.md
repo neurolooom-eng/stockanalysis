@@ -264,11 +264,37 @@ Expect *near* matches rather than exact ones: this app reads Yahoo, Kite reads
 the exchange feed, and a few paise of difference in yesterday's high shifts every
 level slightly. A large divergence means a data problem, not a formula problem.
 
+### The three groups
+
+Chips above the table split the list:
+
+| Group | What it is |
+|---|---|
+| **All** | Everything above the first breakout level |
+| **Broke R3, not R4** | Cleared the first level but not the second |
+| **Above R4** | Through both |
+
+The middle one is usually the interesting group: the break has happened, and the
+next level is still ahead as an obvious first target. The **Room to R4** column
+says how far that is from the current price.
+
+Those two columns read against each other. A stock **+0.09% above R3** with
+**+5.11% room to R4** has only just broken and has the whole move ahead of it.
+One **+5.12% above R3** with **+0.09% room** has already travelled and is about
+to run into the next level instead.
+
+Once a stock is through R4 there is no level above left to measure, so the
+column reads *past it*.
+
+On DeMark and CPR there is only one breakout level, so no groups are shown —
+there is no "broke one but not the other" to separate.
+
 ### Turning the Buy list into a watchlist
 
 **Add to watchlist** puts the whole list onto a watchlist in one click, so the
 score, the Telegram alerts and the history start tracking those names.
 
+**It adds whichever group you have selected**, so what you see is what goes on.
 The dropdown next to it chooses where they go. The default makes a new,
 date-stamped watchlist (`Buy list 20 Aug 14:35`); pick an existing one to add
 them there instead.

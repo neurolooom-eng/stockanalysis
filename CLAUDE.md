@@ -91,6 +91,15 @@ the README for the recovery command if a pull ever removes it.
   `RENDER_GIT_COMMIT` on Render, else `git rev-parse`, else app.py's mtime. It
   is served from `/api/health`, which is outside the login gate on purpose, so
   the owner can check which version is live without signing in.
+- **The Buy list groups are a slice of the same data, not a second scan.** Rows
+  are tagged with the highest breakout level price has cleared, so "broke R3
+  but not R4" is just the rows tagged R3 — filtered client-side, no extra Yahoo
+  requests. `Room to R4` is the distance to the next level up, which is the
+  point of that group. The chips are hidden on DeMark and CPR, which have only
+  one breakout level.
+- **Buy list → watchlist adds the selected group**, not always the whole list —
+  what is on screen is what goes on. `only_level` on the endpoint does the
+  filtering server-side against the same stored rows.
 - **Buy list → watchlist is additive, never destructive.** One click, but it
   skips names already there and reports them, keeps whatever else is on the
   target watchlist, and respects the per-watchlist cap — filling from the top
