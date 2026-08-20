@@ -358,7 +358,7 @@ def save_settings(values: Dict[str, str]) -> None:
 # data yet. Those are the backlog item.
 # ----------------------------------------------------------------------------
 
-SEED_USERS = {"pnk": "123", "kau": "123", "kaushik": "123"}
+SEED_USERS = {"pnk": "123", "kau": "123", "kaushik": "123", "jana": "123"}
 SESSION_COOKIE = "pivotdesk_session"
 SESSION_DAYS = 30
 OPEN_PATHS = {"/api/health", "/api/login", "/api/me"}

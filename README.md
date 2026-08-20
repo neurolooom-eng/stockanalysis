@@ -94,13 +94,14 @@ MA20 is roughly the last 100 minutes, not 20 days.
 
 ## Signing in
 
-Three accounts ship with the app:
+Four accounts ship with the app:
 
 | User | Password |
 |---|---|
 | `pnk` | `123` |
 | `kau` | `123` |
 | `kaushik` | `123` |
+| `jana` | `123` |
 
 Each one is created on startup if it isn't in the database already, so adding a
 name to `SEED_USERS` in `app.py` gives you that account on the next restart —

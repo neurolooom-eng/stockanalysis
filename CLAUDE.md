@@ -183,8 +183,8 @@ the README for the recovery command if a pull ever removes it.
   thirty stocks doesn't fire thirty messages.
 - **The bot token is never returned by the API in full** — `/api/settings` sends
   back only the last four characters.
-- **The login is a gate over shared data, by explicit decision.** Three seeded
-  users (`pnk`, `kau`, `kaushik`, all `123`), salted+hashed, signed HMAC cookie, everything
+- **The login is a gate over shared data, by explicit decision.** Four seeded
+  users (`pnk`, `kau`, `kaushik`, `jana`, all `123`), salted+hashed, signed HMAC cookie, everything
   under `/api/` closed except health/login/me. The owner asked for exactly this
   and moved real accounts to the backlog — don't gold-plate it unasked.
 - **GitHub Pages cannot host this** (static only, no Python). The owner tried;
