@@ -2309,10 +2309,15 @@ def scan_read(timeframe: str = "1d", limit: int = 100):
     }
 
 
+# period, interval. The windows have to cover the largest bar count the chart
+# can ask for (250): 5d of 5m is ~375 bars and 1mo of 15m is ~550, both fine.
+# Daily needs 2y, because 6mo is only ~125 trading days and a 250-bar request
+# would have quietly come back half empty. Yahoo caps intraday history at 60
+# days, so the two intraday windows must stay well inside that.
 CHART_INTERVALS = {
     "5m": ("5d", "5m"),
     "15m": ("1mo", "15m"),
-    "1d": ("6mo", "1d"),
+    "1d": ("2y", "1d"),
 }
 
 
