@@ -151,6 +151,10 @@ def init_db():
                 symbol      TEXT NOT NULL,
                 exchange    TEXT NOT NULL DEFAULT 'NSE',
                 added_at    TEXT NOT NULL,
+                -- The previous session's close on the day this was added, kept
+                -- frozen so "how has it done since I added it" survives.
+                ref_close   REAL,
+                ref_date    TEXT,
                 UNIQUE(profile_id, symbol, exchange)
             );
             CREATE TABLE IF NOT EXISTS signal_log (
@@ -231,6 +235,9 @@ def init_db():
                 level_price REAL NOT NULL,
                 above_pct   REAL NOT NULL,
                 room_pct    REAL,
+                prev_close  REAL,
+                first_at    TEXT,
+                since_pct   REAL,
                 h3          REAL NOT NULL,
                 h4          REAL NOT NULL,
                 pp          REAL NOT NULL,
@@ -240,6 +247,18 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_breakouts
                 ON breakouts(scanned_at, above_pct);
+            -- When a symbol FIRST appeared on the Buy list, and the reference
+            -- close to measure its growth from. The row is dropped when the
+            -- symbol falls back below the trigger level, so a name that
+            -- reappears later starts its clock again rather than reporting
+            -- growth from a run that already ended.
+            CREATE TABLE IF NOT EXISTS buy_first_seen (
+                symbol      TEXT NOT NULL,
+                exchange    TEXT NOT NULL,
+                first_at    TEXT NOT NULL,
+                ref_close   REAL,
+                PRIMARY KEY (symbol, exchange)
+            );
             CREATE TABLE IF NOT EXISTS users (
                 username    TEXT PRIMARY KEY,
                 salt        TEXT NOT NULL,
@@ -254,8 +273,18 @@ def init_db():
         if "alerts" not in cols:
             conn.execute("ALTER TABLE profiles ADD COLUMN alerts INTEGER NOT NULL DEFAULT 1")
         bcols = {r["name"] for r in conn.execute("PRAGMA table_info(breakouts)")}
-        if bcols and "room_pct" not in bcols:
-            conn.execute("ALTER TABLE breakouts ADD COLUMN room_pct REAL")
+        if bcols:
+            for col in ("room_pct", "prev_close", "since_pct"):
+                if col not in bcols:
+                    conn.execute(f"ALTER TABLE breakouts ADD COLUMN {col} REAL")
+            if "first_at" not in bcols:
+                conn.execute("ALTER TABLE breakouts ADD COLUMN first_at TEXT")
+        wcols = {r["name"] for r in conn.execute("PRAGMA table_info(watchlist)")}
+        if wcols:
+            if "ref_close" not in wcols:
+                conn.execute("ALTER TABLE watchlist ADD COLUMN ref_close REAL")
+            if "ref_date" not in wcols:
+                conn.execute("ALTER TABLE watchlist ADD COLUMN ref_date TEXT")
 
 
 # ----------------------------------------------------------------------------
@@ -898,14 +927,25 @@ def score_profile(profile_id: int) -> Dict:
     """
     with db() as conn:
         rows = conn.execute(
-            "SELECT symbol, exchange FROM watchlist WHERE profile_id=? ORDER BY symbol",
-            (profile_id,)).fetchall()
+            "SELECT symbol, exchange, ref_close, ref_date FROM watchlist"
+            " WHERE profile_id=? ORDER BY symbol", (profile_id,)).fetchall()
     # Fetch in parallel. Sequentially, 30 stocks takes a minute or more.
     if rows:
         with ThreadPoolExecutor(max_workers=8) as pool:
             results = list(pool.map(lambda r: analyse(r["symbol"], r["exchange"]), rows))
     else:
         results = []
+
+    # Growth measured from the close frozen when the stock was added, which is
+    # a different thing from change_pct (today's move against yesterday).
+    refs = {(r["symbol"], r["exchange"]): r for r in rows}
+    for r in results:
+        ref = refs.get((r.get("symbol"), r.get("exchange")))
+        ref_close = ref["ref_close"] if ref else None
+        r["ref_close"] = ref_close
+        r["ref_date"] = ref["ref_date"] if ref else None
+        r["since_pct"] = (round((r["price"] - ref_close) / ref_close * 100, 2)
+                          if ref_close and r.get("price") else None)
 
     good = [r for r in results if "error" not in r]
     changes: List[Dict] = []
@@ -1478,6 +1518,7 @@ def scan_breakouts(exchange: str = "NSE") -> Dict:
             # is the previous completed session, and it sets today's levels.
             prev = d.iloc[-2]
             piv = bar_pivots(prev, system)
+            prev_close = float(prev["Close"])
 
             live = intra.get(sym)
             if live is not None and not live.empty:
@@ -1524,6 +1565,10 @@ def scan_breakouts(exchange: str = "NSE") -> Dict:
             # through it, which is what pushes those names to the bottom.
             "room_pct": (round((piv[hi_key] - price) / price * 100, 2)
                          if hi_key in piv and price else None),
+            "prev_close": round(prev_close, 2),
+            # Today's move, against the previous session's close.
+            "today_pct": (round((price - prev_close) / prev_close * 100, 2)
+                          if prev_close else None),
             # Stored as h3/h4 whatever this system calls the two levels.
             "h3": round(piv[lo_key], 2), "h4": round(piv[hi_key], 2),
             "h3_name": pretty_level(lo_key), "h4_name": pretty_level(hi_key),
@@ -1537,17 +1582,55 @@ def scan_breakouts(exchange: str = "NSE") -> Dict:
     # stock with the furthest still to run to the next level is the one worth
     # looking at, and names already through it have negative room so they fall
     # to the bottom on their own.
+    # ---- growth since the name first appeared on the list ----
+    #
+    # A symbol keeps its reference close for as long as it stays above the
+    # trigger. Once it drops back below, the row is cleared so that if it
+    # breaks out again next week the clock starts again rather than reporting
+    # growth from a run that already ended.
+    #
+    # Symbols that failed to fetch are left alone: no data is not the same as
+    # "no longer a buy", and clearing them would lose the reference over a
+    # transient Yahoo hiccup.
+    hit_syms = {h["symbol"] for h in hits}
+    scanned_ok = {s for s in universe if s in daily} - set(failed)
+    with db() as conn:
+        seen = {r["symbol"]: r for r in conn.execute(
+            "SELECT symbol, first_at, ref_close FROM buy_first_seen"
+            " WHERE exchange = ?", (exchange,))}
+        for h in hits:
+            row = seen.get(h["symbol"])
+            if row is None:
+                conn.execute(
+                    "INSERT OR REPLACE INTO buy_first_seen"
+                    " (symbol, exchange, first_at, ref_close) VALUES (?,?,?,?)",
+                    (h["symbol"], exchange, scanned_at, h["prev_close"]))
+                h["first_at"] = scanned_at
+                h["ref_close"] = h["prev_close"]
+            else:
+                h["first_at"] = row["first_at"]
+                h["ref_close"] = row["ref_close"]
+            ref = h["ref_close"]
+            h["since_pct"] = (round((h["price"] - ref) / ref * 100, 2)
+                              if ref else None)
+        gone = (scanned_ok - hit_syms) & set(seen)
+        for sym in gone:
+            conn.execute("DELETE FROM buy_first_seen WHERE symbol=? AND exchange=?",
+                         (sym, exchange))
+
     hits.sort(key=lambda h: -(h["room_pct"] if h["room_pct"] is not None else -999))
 
     with db() as conn:
         for h in hits:
             conn.execute(
                 "INSERT OR REPLACE INTO breakouts (symbol, exchange, scanned_at,"
-                " price, level_name, level_price, above_pct, room_pct, h3, h4,"
-                " pp, coiled, turnover_cr) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " price, level_name, level_price, above_pct, room_pct,"
+                " prev_close, first_at, since_pct, h3, h4, pp, coiled,"
+                " turnover_cr) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (h["symbol"], h["exchange"], scanned_at, h["price"],
                  h["level_name"], h["level_price"], h["above_pct"],
-                 h["room_pct"], h["h3"], h["h4"], h["pp"], int(h["coiled"]),
+                 h["room_pct"], h["prev_close"], h["first_at"], h["since_pct"],
+                 h["h3"], h["h4"], h["pp"], int(h["coiled"]),
                  h["turnover_cr"]))
 
     return {"scanned": len(universe), "buys": hits, "skipped_illiquid": skipped,
@@ -1946,7 +2029,8 @@ def get_stocks(profile_id: int):
         if not prof:
             raise HTTPException(404, "Watchlist not found")
         rows = conn.execute(
-            "SELECT symbol, exchange FROM watchlist WHERE profile_id = ? ORDER BY symbol",
+            "SELECT symbol, exchange, ref_close, ref_date, added_at"
+            " FROM watchlist WHERE profile_id = ? ORDER BY symbol",
             (profile_id,)).fetchall()
     return {"profile": dict(prof), "stocks": [dict(r) for r in rows],
             "limit": caps()["max_stocks_per_profile"]}
@@ -1970,13 +2054,27 @@ def add_stock(profile_id: int, body: StockIn):
             raise HTTPException(
                 400, f"This watchlist already holds {limit} stocks. "
                      f"Remove one, or raise the cap in Settings.")
+    # The previous session's close, frozen now, so the card can show how the
+    # stock has done SINCE it was added rather than only today's move. A
+    # failed lookup is not worth refusing the add over - the column just
+    # reads "-" for that row.
+    ref_close = None
+    try:
+        quote = analyse(symbol, exchange)
+        ref_close = quote.get("prev_close")
+    except Exception:  # noqa: BLE001 - never block an add on the price feed
+        ref_close = None
+
+    with db() as conn:
         try:
             conn.execute(
-                "INSERT INTO watchlist (profile_id, symbol, exchange, added_at) VALUES (?,?,?,?)",
-                (profile_id, symbol, exchange, datetime.now().isoformat()))
+                "INSERT INTO watchlist (profile_id, symbol, exchange, added_at,"
+                " ref_close, ref_date) VALUES (?,?,?,?,?,?)",
+                (profile_id, symbol, exchange, datetime.now().isoformat(),
+                 ref_close, datetime.now(IST).date().isoformat()))
         except sqlite3.IntegrityError:
             raise HTTPException(400, f"{symbol} is already on this watchlist")
-    return {"symbol": symbol, "exchange": exchange}
+    return {"symbol": symbol, "exchange": exchange, "ref_close": ref_close}
 
 
 @app.delete("/api/profiles/{profile_id}/stocks/{symbol}")
@@ -2303,6 +2401,9 @@ def buylist_read(limit: int = 200):
         b["coiled"] = bool(b["coiled"])
         b["h3_name"] = pretty_level(breakout_keys[0])
         b["h4_name"] = pretty_level(breakout_keys[-1])
+        pc = b.get("prev_close")
+        b["today_pct"] = (round((b["price"] - pc) / pc * 100, 2)
+                          if pc else None)
     return {"scanned_at": last, "buys": buys,
             "universe_size": len(scanner_config()["universe"]),
             "market_open": market_is_open(),
@@ -2383,9 +2484,16 @@ def buylist_to_watchlist(body: BuyListToWatchlist):
             if count >= stock_cap:
                 no_room.append(b["symbol"])
                 continue
+            # The Buy list already carries the reference close it was first
+            # flagged against, so carry that across rather than re-fetching -
+            # and the watchlist then measures from the same point the Buy list
+            # does, instead of restarting the clock on the day it was added.
             conn.execute(
-                "INSERT INTO watchlist (profile_id, symbol, exchange, added_at)"
-                " VALUES (?,?,?,?)", (profile_id, b["symbol"], b["exchange"], now))
+                "INSERT INTO watchlist (profile_id, symbol, exchange, added_at,"
+                " ref_close, ref_date) VALUES (?,?,?,?,?,?)",
+                (profile_id, b["symbol"], b["exchange"], now,
+                 b.get("ref_close") or b.get("prev_close"),
+                 (b.get("first_at") or now)[:10]))
             held.add(pair)
             count += 1
             added.append(b["symbol"])
