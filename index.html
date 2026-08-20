@@ -233,6 +233,9 @@ td.sig .BUY{color:var(--up)} td.sig .SELL{color:var(--down)} td.sig .HOLD{color:
 .chartpanel{background:var(--panel);border:1px solid var(--rule);
   padding:16px;width:100%;max-width:980px;max-height:92vh;overflow:auto}
 .chartscroll{overflow-x:auto}
+/* Divider between the interval chips and the bar-count chips. */
+.axsep{display:inline-block;width:1px;height:20px;background:var(--rule);
+  margin:0 4px;vertical-align:middle}
 .candles{width:100%;min-width:520px;height:auto;display:block}
 .sym.click{cursor:pointer;text-decoration:underline;text-decoration-style:dotted;
   text-underline-offset:3px}
@@ -675,6 +678,7 @@ function renderHistory(){
 /* ---------------- strategy ---------------- */
 /* ---------------- chart ---------------- */
 let chartSym = null, chartEx = 'NSE', chartInt = localStorage.getItem('chartInt') || '5m';
+let chartBars = +(localStorage.getItem('chartBars') || 120);
 
 async function openChart(symbol, exchange){
   chartSym = symbol; chartEx = exchange || 'NSE';
@@ -694,17 +698,30 @@ function setChartInterval(iv){
   loadChart();
 }
 
+function setChartBars(n){
+  chartBars = n;
+  localStorage.setItem('chartBars', n);
+  drawChartTabs();
+  loadChart();
+}
+
 function drawChartTabs(){
-  $('#chartTabs').innerHTML = ['5m','15m','1d'].map(iv =>
+  const ivs = ['5m','15m','1d'].map(iv =>
     `<button class="chip" aria-pressed="${iv === chartInt}"
       onclick="setChartInterval('${iv}')">${iv === '1d' ? 'Daily' : iv}</button>`).join('');
+  const counts = [60, 120, 250].map(n =>
+    `<button class="chip" aria-pressed="${n === chartBars}"
+      onclick="setChartBars(${n})">${n}</button>`).join('');
+  $('#chartTabs').innerHTML = ivs
+    + '<span class="axsep"></span>' + counts;
 }
 
 async function loadChart(){
   if(!chartSym) return;
   try{
     const d = await api(`/api/chart?symbol=${encodeURIComponent(chartSym)}`
-      + `&exchange=${encodeURIComponent(chartEx)}&interval=${chartInt}`);
+      + `&exchange=${encodeURIComponent(chartEx)}&interval=${chartInt}`
+      + `&bars=${chartBars}`);
     $('#chartBody').innerHTML = candleChart(d);
   }catch(e){
     $('#chartBody').innerHTML = `<p class="hint">Could not load: ${esc(e.message)}</p>`;
@@ -770,17 +787,89 @@ function candleChart(d){
         opacity="${o.key ? 0.85 : 0.5}" ${dash}/>${text}`;
   }).join('');
 
-  const candles = bars.map((b, i) => {
-    const up = b.c >= b.o;
-    const col = up ? 'var(--up)' : 'var(--down)';
-    const top = y(Math.max(b.o, b.c)), bot = y(Math.min(b.o, b.c));
-    const h = Math.max(1, bot - top);
-    return `<line x1="${x(i).toFixed(1)}" x2="${x(i).toFixed(1)}"
-        y1="${y(b.h).toFixed(1)}" y2="${y(b.l).toFixed(1)}"
-        stroke="${col}" stroke-width="0.9"/>
-      <rect x="${(x(i) - cw / 2).toFixed(1)}" y="${top.toFixed(1)}"
-        width="${cw.toFixed(1)}" height="${h.toFixed(1)}" fill="${col}"/>`;
-  }).join('');
+  // Below about 2px a candle is a smear rather than a candle, and there is no
+  // zoom to recover from that. Decide on the computed width, not a bar count,
+  // so it still holds if the panel width changes.
+  const asLine = cw < 2.2;
+  const candles = asLine
+    ? `<polyline fill="none" stroke="var(--brass)" stroke-width="1.1"
+         points="${bars.map((b, i) => `${x(i).toFixed(1)},${y(b.c).toFixed(1)}`).join(' ')}"/>`
+    : bars.map((b, i) => {
+        const up = b.c >= b.o;
+        const col = up ? 'var(--up)' : 'var(--down)';
+        const top = y(Math.max(b.o, b.c)), bot = y(Math.min(b.o, b.c));
+        const h = Math.max(1, bot - top);
+        return `<line x1="${x(i).toFixed(1)}" x2="${x(i).toFixed(1)}"
+            y1="${y(b.h).toFixed(1)}" y2="${y(b.l).toFixed(1)}"
+            stroke="${col}" stroke-width="0.9"/>
+          <rect x="${(x(i) - cw / 2).toFixed(1)}" y="${top.toFixed(1)}"
+            width="${cw.toFixed(1)}" height="${h.toFixed(1)}" fill="${col}"/>`;
+      }).join('');
+
+  // ---- x axis ----
+  //
+  // Sessions first: on an intraday chart the date change between two bars is
+  // where one trading day ends and the next begins, and without it a multi-day
+  // 5m chart is an undifferentiated wall of candles. Those boundaries get the
+  // date as their label; everything else gets the time.
+  const daily = d.interval === '1d';
+  const dayOf = t => new Date(t).toDateString();
+  const boundaries = [];
+  if(!daily){
+    for(let i = 1; i < bars.length; i++){
+      if(dayOf(bars[i].t) !== dayOf(bars[i - 1].t)) boundaries.push(i);
+    }
+  }
+  const sessionRules = boundaries.map(i =>
+    `<line x1="${(x(i) - cw / 2 - 1).toFixed(1)}" x2="${(x(i) - cw / 2 - 1).toFixed(1)}"
+       y1="${padT}" y2="${(H - padB).toFixed(1)}" stroke="var(--rule)"
+       stroke-width="0.8" opacity="0.8"/>`).join('');
+
+  // Candidate ticks: the session boundaries, plus about six spread evenly, and
+  // always the first and last bar. Same claim-a-slot rule as the pivot labels
+  // rather than a second mechanism - boundaries claim first because they are
+  // the ones that orient you.
+  const fmtTick = (t, withDate) => {
+    const dt = new Date(t);
+    return (daily || withDate)
+      ? dt.toLocaleDateString('en-IN', {day:'2-digit', month:'short'})
+      : dt.toLocaleTimeString('en-IN', {hour:'2-digit', minute:'2-digit', hour12:false});
+  };
+  const step = Math.max(1, Math.floor(bars.length / 6));
+  const evens = [];
+  for(let i = 0; i < bars.length; i += step) evens.push(i);
+  if(evens[evens.length - 1] !== bars.length - 1) evens.push(bars.length - 1);
+
+  const TICK_GAP = 58;          // px, enough for "19 Aug" in the mono face
+  const usedX = [];
+  const ticks = [];
+  const claimTick = (i, withDate) => {
+    const px = x(i);
+    if(usedX.every(u => Math.abs(u - px) >= TICK_GAP)){
+      usedX.push(px);
+      ticks.push({px, text: fmtTick(bars[i].t, withDate)});
+    }
+  };
+  boundaries.forEach(i => claimTick(i, true));
+  evens.forEach(i => claimTick(i, false));
+
+  const axisY = H - padB;
+  const axis = `<line x1="${padL}" x2="${W - padR}" y1="${axisY.toFixed(1)}"
+      y2="${axisY.toFixed(1)}" stroke="var(--rule)" stroke-width="0.8"/>`
+    + ticks.map(t => {
+        // A centred label at either end runs off the canvas and gets clipped,
+        // so the outermost ones anchor inward instead. The tick mark stays
+        // exactly on the bar it belongs to either way.
+        const nearL = t.px < padL + 20, nearR = t.px > W - padR - 20;
+        const anchor = nearL ? 'start' : nearR ? 'end' : 'middle';
+        const tx = nearL ? padL : nearR ? W - padR : t.px;
+        return `<line x1="${t.px.toFixed(1)}" x2="${t.px.toFixed(1)}"
+           y1="${axisY.toFixed(1)}" y2="${(axisY + 3).toFixed(1)}"
+           stroke="var(--rule)" stroke-width="0.8"/>
+         <text class="xlab" x="${(+tx).toFixed(1)}" y="${(axisY + 14).toFixed(1)}"
+           fill="var(--dim)" font-size="9.5" text-anchor="${anchor}"
+           font-family="ui-monospace,monospace">${esc(t.text)}</text>`;
+      }).join('');
 
   const last = bars[bars.length - 1];
   const first = new Date(bars[0].t), latest = new Date(last.t);
@@ -789,15 +878,20 @@ function candleChart(d){
 
   return `<div class="chartscroll"><svg viewBox="0 0 ${W} ${H}"
       preserveAspectRatio="xMidYMid meet" class="candles">
-    ${lines}${candles}
+    ${sessionRules}${lines}${candles}${axis}
     <line x1="${padL}" x2="${W - padR}" y1="${y(last.c).toFixed(1)}"
       y2="${y(last.c).toFixed(1)}" stroke="var(--brass)" stroke-width="0.7"
       stroke-dasharray="2 3" opacity="0.9"/>
   </svg></div>
-  <p class="hint">${esc(d.symbol)} · ${esc(d.interval === '1d' ? 'daily' : d.interval)}
-    bars · ${bars.length} shown, ${esc(fmt(first))} to ${esc(fmt(latest))} ·
-    last ${money(d.price)} · <b>${esc(d.pivot_label)}</b> levels from the previous
-    session. Solid lines are the band, dashed are the rest. Yahoo data is delayed.</p>`;
+  <p class="hint">${esc(d.symbol)} · ${esc(daily ? 'daily' : d.interval)}
+    ${asLine ? 'closing line' : 'candles'} · ${bars.length} shown,
+    ${esc(fmt(first))} to ${esc(fmt(latest))} · last ${money(d.price)} ·
+    <b>${esc(d.pivot_label)}</b> levels from the previous session.
+    ${asLine ? 'Too many bars to draw as candles at this width, so this is a\
+      line through the closes. ' : ''}Solid lines are the band, dashed are the
+    rest.${boundaries.length ? ` ${boundaries.length} session break${
+      boundaries.length === 1 ? '' : 's'} marked.` : ''}
+    Yahoo data is delayed.</p>`;
 }
 
 /* ---------------- buy list (above R3 / R4) ---------------- */

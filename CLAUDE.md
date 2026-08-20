@@ -81,6 +81,19 @@ the README for the recovery command if a pull ever removes it.
   levels.
 - **The Scanner shows an amber warning when not on Camarilla**, because that is
   the moment it stops matching the owner's Chartink scan. Don't remove it.
+- **The chart's dense fallback keys off the computed candle width, not a bar
+  count.** Below ~2.2px a candle is a smear, so it draws a closing line
+  instead and says so in the caption. Deciding on width means it still holds
+  if the panel size changes. Pan and zoom is the real answer to wanting more
+  bars and is deliberately not attempted against a hand-drawn SVG.
+- **The x axis labels session breaks by date and everything else by time.**
+  On intraday intervals a vertical rule marks each date change; without it a
+  multi-day 5m chart is unreadable. Ticks claim slots by the same
+  minimum-gap rule the pivot labels use — one mechanism, not two — and the
+  outermost labels anchor inward so they are not clipped at the edges.
+- **`CHART_INTERVALS["1d"]` fetches 2y** because the chart can ask for 250
+  bars and 6mo is only ~125 trading days. The intraday windows must stay well
+  inside Yahoo's 60-day cap on 5m/15m history.
 - **The chart is hand-drawn SVG, no charting library.** Same reason as no React:
   four files, no build step. It also means no drawing tools or pan/zoom, which
   is an accepted trade, not an oversight. Levels are drawn from the previous
@@ -170,8 +183,8 @@ the README for the recovery command if a pull ever removes it.
   thirty stocks doesn't fire thirty messages.
 - **The bot token is never returned by the API in full** — `/api/settings` sends
   back only the last four characters.
-- **The login is a gate over shared data, by explicit decision.** Three seeded
-  users (`pnk`, `kau`, `kaushik`, all `123`), salted+hashed, signed HMAC cookie, everything
+- **The login is a gate over shared data, by explicit decision.** Four seeded
+  users (`pnk`, `kau`, `kaushik`, `jana`, all `123`), salted+hashed, signed HMAC cookie, everything
   under `/api/` closed except health/login/me. The owner asked for exactly this
   and moved real accounts to the backlog — don't gold-plate it unasked.
 - **GitHub Pages cannot host this** (static only, no Python). The owner tried;

@@ -94,13 +94,14 @@ MA20 is roughly the last 100 minutes, not 20 days.
 
 ## Signing in
 
-Three accounts ship with the app:
+Four accounts ship with the app:
 
 | User | Password |
 |---|---|
 | `pnk` | `123` |
 | `kau` | `123` |
 | `kaushik` | `123` |
+| `jana` | `123` |
 
 Each one is created on startup if it isn't in the database already, so adding a
 name to `SEED_USERS` in `app.py` gives you that account on the next restart —
@@ -203,7 +204,27 @@ contraction scan, measured a different way.
 
 Click any symbol — on a Signals card, in the Buy list, or in the Scanner — to
 open a candlestick chart with your pivot levels drawn across it. **5m**, **15m**
-and **Daily** are the available intervals.
+and **Daily** are the available intervals, and **60 / 120 / 250** chooses how
+many bars to draw. Both choices are remembered between sessions.
+
+What 250 covers depends on the interval — an NSE session is 375 minutes, so it
+is about three days of 5m bars, ten days of 15m, or a year of daily.
+
+### Reading the x axis
+
+Times run along the bottom: `HH:MM` on the intraday intervals, dates on daily.
+On 5m and 15m a faint vertical rule marks each **session break**, and that tick
+is labelled with the date rather than the time — without it a multi-day
+intraday chart is an undifferentiated wall of candles. Labels are dropped where
+they would collide rather than overprinting each other.
+
+### When it switches to a line
+
+At 250 bars the candles would be about two pixels wide, which is a smear rather
+than a chart, and there is no zoom to recover from it. Past that point the chart
+draws a single line through the closes instead, and the caption says so. The
+switch is decided on the actual drawn width, so it adapts if the panel size ever
+changes.
 
 The levels come from the previous completed session whatever interval you pick,
 so the lines don't move as you switch timeframe. That is how pivots work and how
