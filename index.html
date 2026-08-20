@@ -239,6 +239,7 @@ td.sig .BUY{color:var(--up)} td.sig .SELL{color:var(--down)} td.sig .HOLD{color:
   <span class="tagline">CAMARILLA / MA / VWAP &nbsp;—&nbsp; NSE &amp; BSE</span>
   <nav class="views" id="views">
     <button data-view="signals" aria-current="true" onclick="go('signals')">Signals</button>
+    <button data-view="scanner" onclick="go('scanner')">Scanner</button>
     <button data-view="strategy" onclick="go('strategy')">Strategy</button>
     <button data-view="history" onclick="go('history')">History</button>
     <button data-view="settings" onclick="go('settings')">Settings</button>
@@ -274,6 +275,7 @@ const $ = s => document.querySelector(s);
 let profiles = [], active = null, stocks = [], limit = 30, starter = [], busy = false;
 let view = 'signals', lastData = null, settings = null, hist = null, caps = {}, me = null;
 let strat = null;
+let scan = null, scanTf = localStorage.getItem('scanTf') || '1d', scanning = false;
 let autoOn = localStorage.getItem('auto') === '1';
 let autoSecs = +(localStorage.getItem('autoSecs') || 60);
 let autoTimer = null;
@@ -347,6 +349,7 @@ function go(v){
   if(v === 'history' && active) return loadHistory();
   if(v === 'settings') return loadSettings();
   if(v === 'strategy') return loadStrategy();
+  if(v === 'scanner') return loadScan();
   render(lastData);
 }
 
@@ -578,6 +581,102 @@ function renderHistory(){
 }
 
 /* ---------------- strategy ---------------- */
+/* ---------------- contraction scanner ---------------- */
+const TF_LABEL = {'1d':'Daily', '15m':'15 min', '5m':'5 min'};
+
+async function loadScan(){
+  try{ scan = await api('/api/scan?timeframe=' + scanTf); }
+  catch(e){ toast(e.message); scan = null; }
+  render(lastData);
+}
+
+function setTf(tf){
+  scanTf = tf;
+  localStorage.setItem('scanTf', tf);
+  scan = null;
+  render(lastData);
+  loadScan();
+}
+
+async function runContraction(){
+  if(scanning) return;
+  scanning = true;
+  render(lastData);
+  toast(`Scanning ${TF_LABEL[scanTf]} — a full F&O list takes a minute…`);
+  try{
+    const r = await api('/api/scan/run?timeframe=' + scanTf, {method:'POST'});
+    let msg = `${r.hits.length} contracting of ${r.scanned} scanned`;
+    if(r.skipped_illiquid) msg += ` · ${r.skipped_illiquid} too thin`;
+    if(r.failed.length)    msg += ` · ${r.failed.length} no data`;
+    toast(msg);
+    scan = null;
+    await loadScan();
+  }catch(e){ toast(e.message); }
+  finally{ scanning = false; render(lastData); }
+}
+
+function renderScanner(){
+  const tabs = Object.keys(TF_LABEL).map(tf =>
+    `<button class="chip" aria-pressed="${tf === scanTf}" onclick="setTf('${tf}')"
+      >${TF_LABEL[tf]}</button>`).join('');
+
+  const head = `<section class="panel">
+    <h2>Contraction scanner</h2>
+    <p class="lede">Finds stocks whose Camarilla H3–L3 band has closed in on
+      <b>both</b> sides versus the previous bar — the band now sits entirely inside
+      the last one. On <b>Daily</b> these are the names to watch for the next
+      session, using levels tomorrow actually trades against. On <b>15 min</b> and
+      <b>5 min</b> they are coils forming inside today's session.</p>
+    <div class="row" style="margin-top:14px">${tabs}
+      <button class="btn solid" onclick="runContraction()" ${scanning ? 'disabled' : ''}>
+        ${scanning ? 'Scanning…' : 'Sync now'}</button>
+    </div>`;
+
+  if(!scan) return head + `<div class="empty"><p>Loading…</p></div></section>`;
+
+  if(!scan.hits.length){
+    return head + `<div class="empty"><p>No stored ${TF_LABEL[scanTf]} hits yet.
+      Press <b>Sync now</b> to scan ${scan.universe_size} symbols.</p></div></section>`;
+  }
+
+  const rows = scan.hits.map(h => {
+    const chips = (h.rules || []).map(r =>
+      `<span class="chip" style="padding:2px 8px;font-size:11px"
+        title="+${r.weight}">${esc(r.text)}</span>`).join(' ');
+    return `<tr>
+      <td><b>${esc(h.symbol)}</b></td>
+      <td class="sig"><b class="${h.rank_score >= 2.5 ? 'BUY' : 'HOLD'}"
+        >${h.rank_score}</b></td>
+      <td>${money(h.price)}</td>
+      <td>${money(h.h3)}<br><span class="open">${money(h.l3)}</span></td>
+      <td>${h.band_pct}%</td>
+      <td>${h.depth_pct}%</td>
+      <td>${h.streak}</td>
+      <td>${chips || '<span class="open">—</span>'}</td>
+    </tr>`;
+  }).join('');
+
+  return head + `
+    <div class="cards" style="margin-top:14px">
+      <div class="stat"><b>${scan.hits.length}</b><span>contracting</span></div>
+      <div class="stat"><b>${scan.universe_size}</b><span>symbols scanned</span></div>
+      <div class="stat"><b>${scan.hits.filter(h => h.rank_score >= 2.5).length}</b>
+        <span>ranked 2.5+</span></div>
+      <div class="stat"><b>${scan.scanned_at ? stamp(scan.scanned_at) : '—'}</b>
+        <span>last sync</span></div>
+    </div>
+    <table style="margin-top:14px">
+      <thead><tr><th>Symbol</th><th>Rank</th><th>Price</th><th>H3 / L3</th>
+        <th>Band</th><th>Tighter by</th><th>Streak</th><th>Why it ranks</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <p class="lede">Rank is additive and every point is listed, so a high score can
+      be argued with rather than trusted. It measures how tightly a stock has coiled
+      — <b>not</b> which way it will break. Yahoo data is delayed and this places no
+      orders.</p>
+  </section>`;
+}
+
 async function loadStrategy(){
   try{ strat = await api('/api/strategy'); }
   catch(e){ toast(e.message); strat = null; }
@@ -753,6 +852,14 @@ async function toggleProfileAlerts(id, on){
   await loadProfiles(); loadSettings();
 }
 
+function saveScanner(){
+  saveSettings({
+    min_turnover_cr: +$('#scTurn').value,
+    rank_min_score: +$('#scRank').value,
+    fno_universe: $('#scUni').value.trim(),
+  });
+}
+
 function saveStrategy(){
   saveSettings({
     band_max_pct: +$('#stBand').value,
@@ -766,7 +873,7 @@ function saveStrategy(){
 
 function renderSettings(){
   if(!settings) return '<div class="empty"><p>Loading settings…</p></div>';
-  const s = settings, L = s.loop || {}, st = s.strategy || {};
+  const s = settings, L = s.loop || {}, st = s.strategy || {}, sc = s.scanner || {};
   const perList = profiles.map(p => `<label class="check">
       <input type="checkbox" ${p.alerts ? 'checked' : ''}
         onchange="toggleProfileAlerts(${p.id}, this.checked)"> ${esc(p.name)}</label>`)
@@ -775,7 +882,7 @@ function renderSettings(){
   return `<section class="panel">
     <h2>Settings</h2>
     <p class="lede">Everything here is stored in the database on this machine.
-      There is no login — anyone who can open this page can change it.</p>
+      Both accounts share it, so a change here changes it for both of you.</p>
 
     <h3>Telegram alerts</h3>
     <p class="lede">Message @BotFather on Telegram, send <b>/newbot</b>, and paste the
@@ -820,6 +927,41 @@ function renderSettings(){
 
     <h3>Alert these watchlists</h3>
     <div class="row">${perList}</div>
+
+    <h3>Contraction scanner</h3>
+    <p class="lede">The universe and filters the Scanner tab runs over.</p>
+    <div class="row">
+      <label for="scSrc">Scan list</label>
+      <select id="scSrc" class="btn" onchange="saveSettings({scan_source:this.value})">
+        <option value="fno" ${sc.scan_source === 'fno' ? 'selected' : ''}
+          >NSE F&amp;O list (${sc.fno_builtin} built in)</option>
+        <option value="starter" ${sc.scan_source === 'starter' ? 'selected' : ''}
+          >Starter list</option>
+        <option value="custom" ${sc.scan_source === 'custom' ? 'selected' : ''}
+          >My own list below</option>
+      </select>
+      <span class="hint">Currently scanning ${sc.universe_size} symbols.</span>
+    </div>
+    <div class="row">
+      <label for="scTurn">Min turnover</label>
+      <input type="number" id="scTurn" step="5" min="0" value="${sc.min_turnover_cr}">
+      <span class="hint">₹ crore traded per day, averaged over 20 days. Drops thin
+        names where a breakout is hard to actually get filled on.</span>
+    </div>
+    <div class="row">
+      <label for="scRank">Min rank</label>
+      <input type="number" id="scRank" step="0.5" min="0" max="5" value="${sc.rank_min_score}">
+      <span class="hint">Hide hits scoring below this. 0 shows every contraction.</span>
+    </div>
+    <div class="row">
+      <label for="scUni">My own list</label>
+      <input type="text" id="scUni" value="${esc(sc.fno_universe || '')}"
+        placeholder="blank = the built-in F&amp;O list">
+      <span class="hint">Comma separated. The built-in F&amp;O list is typed in, not
+        fetched — NSE revises it every few months, so check it against NSE's own
+        list now and then and paste corrections here.</span>
+    </div>
+    <div class="row"><button class="btn solid" onclick="saveScanner()">Save scanner</button></div>
 
     <h3>Breakout strategy</h3>
     <p class="lede">Every number the strategy uses. It alerts through the same
@@ -907,6 +1049,7 @@ function render(data){
   const el = $('#body');
   if(active && view === 'history'){ el.innerHTML = renderHistory(); return; }
   if(view === 'settings'){ el.innerHTML = renderSettings(); return; }
+  if(view === 'scanner'){ el.innerHTML = renderScanner(); return; }
   if(view === 'strategy'){ el.innerHTML = renderStrategy(); return; }
   if(!active){
     el.innerHTML = `<div class="empty"><p>No watchlists yet. Each one holds its own

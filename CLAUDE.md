@@ -62,6 +62,30 @@ the README for the recovery command if a pull ever removes it.
   polls and the alert loop sweeps; logging every pass would bury the real
   transitions and make the hit rate meaningless. This is also what makes "alert
   on change" and "history" the same mechanism — `score_profile()` serves both.
+- **"Contraction" means the inside-band test, not a narrow band.** The Scanner
+  selects stocks where this bar's H3 < the previous bar's H3 **and** this bar's
+  L3 > the previous bar's L3 — the band has closed in on both sides and sits
+  inside the previous one. This came from the owner's Chartink scan, whose
+  `0.275` is just the Camarilla `1.1/4` coefficient. It is deliberately *not*
+  the same test as the breakout strategy's `band_pct` (band width as a % of
+  price); a stock can be permanently narrow without contracting. Don't collapse
+  the two.
+- **The scanner never reads a forming bar.** `completed_bars()` drops the last
+  bar while the market is open. A contraction test against a half-built bar
+  flips all day and would make the daily "next session" list meaningless.
+- **The rank is additive and itemised**, like `score_signal()`. Depth, streak,
+  volume dry-up, NR4/NR7 and trend each contribute a stated number of points
+  with a reason attached. Liquidity is a *filter*, not a score. The rank
+  measures how tightly a stock coiled and says nothing about direction — never
+  present it as a buy signal.
+- **The F&O universe is typed into `app.py`, not fetched.** nseindia.com is not
+  reachable from the sandbox (403 at the proxy) and blocks scripted clients
+  generally. The list drifts as NSE revises the segment, so it is editable from
+  Settings and documented as needing periodic manual checking. Per-symbol
+  failures are reported and don't fail the scan.
+- **Symbols are fetched in batches**, ~40 per Yahoo request via
+  `batch_history()`. The older one-request-per-symbol path is fine for 60 names
+  and will get rate-limited at 190.
 - **The breakout strategy is a separate mechanism from the score**, sharing only
   `analyse()`. Owner's spec, from a handwritten note: scan for a narrow H3−L3
   band, enter 0.1% above H3 *or* on a candle close above it, stop 0.3% below the
@@ -98,14 +122,32 @@ the README for the recovery command if a pull ever removes it.
 - Hit rate is measured at bar closes on delayed data with no costs modelled. It
   describes what the score did; it is not a backtest.
 
-## Next steps, in the owner's priority order
+## Backlog
 
-1. **Proper accounts** (owner's own backlog item): password-change screen,
+Not active work. The owner sets the order; don't start any of these unasked.
+
+1. **Scanner Phase 2 — unattended scanning and alerts** (owner moved this to
+   the backlog after Phase 1 shipped, to test the scanner by hand first).
+   Agreed shape: re-run the intraday scan every 15 minutes and message on new
+   contractions. It was written and then deliberately backed out, so the repo
+   carries no dormant half-feature. When picking it up:
+   - Alert on **newly appearing** symbols only. A stock that stays coiled must
+     not message every 15 minutes — same reason `signal_log` records changes
+     rather than every pass.
+   - Keep the first-sighting-is-silent rule, or the very first run fires one
+     message per hit.
+   - Distinguish "no previous scan exists" from "previous scan lacked this
+     symbol"; they are not the same and only the second should alert.
+   - **Hosting is the real blocker**, not the code. A free host that sleeps
+     when idle cannot do dependable 15-minute alerts.
+2. **Proper accounts** (owner's own backlog item): password-change screen,
    per-user private watchlists, real passwords, rate-limited sign-in.
-2. **Broker feed** (Zerodha Kite / Angel One / Dhan) for genuinely live prices.
+3. **Broker feed** (Zerodha Kite / Angel One / Dhan) for genuinely live prices.
    Only `analyse()` needs to change.
-3. **Holiday calendar** for the alert loop.
-4. **Alert thresholds** — signal types or score levels worth messaging about.
+4. **Holiday calendar** for the alert loop.
+5. **Alert thresholds** — signal types or score levels worth messaging about.
+6. **Refresh the F&O list** against NSE's published segment list. It is typed
+   into `app.py` and drifts as NSE revises it.
 
 ## House rules
 
