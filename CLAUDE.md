@@ -4,10 +4,27 @@ Context for anyone (or any Claude session) picking this project up.
 
 ## What this is
 
-Pivot Desk — an intraday signal dashboard for NSE/BSE stocks, built for personal
-use by two people. Scores each watched stock on Camarilla pivots, moving averages
-and session VWAP, and reports BUY / SELL / HOLD with the reasoning shown.
-Messages both phones over Telegram when a signal changes.
+Pivot Desk — an intraday signal desk for NSE/BSE stocks, built for personal use
+by a handful of people sharing one dataset (four seeded accounts).
+
+Everything derives from pivots computed on the previous completed session's
+H/L/C. Three mechanisms sit on top of that, sharing `analyse()` and the pivot
+maths but otherwise independent — don't collapse them into each other:
+
+1. **The score** (`score_signal`) — trend, session VWAP and pivot position,
+   additive from −3 to +3, reported with its reasons. Drives the Signals cards,
+   the Telegram alerts and the history/hit-rate view.
+2. **The Scanner** (`scan_contraction`) — the owner's Chartink filter, finding
+   stocks whose pivot band has closed inside the previous bar's, ranked by how
+   tightly they coiled. Directionless by design.
+3. **The Buy list** (`scan_breakouts`) — F&O names above the breakout level,
+   with room-to-next-level and growth from first flagging.
+
+There is also a separate breakout strategy (`run_strategy_sweep`) journalling
+what its rules said, and a hand-drawn SVG chart. Six pivot systems are
+selectable and all of the above follow the selection.
+
+It alerts over Telegram when a signal changes. It never places orders.
 
 Repo: https://github.com/neurolooom-eng/stockanalysis
 
@@ -23,7 +40,7 @@ Repo: https://github.com/neurolooom-eng/stockanalysis
 
 ## Architecture
 
-Four files, deliberately. One folder, no subdirectories, no build step.
+Five files, deliberately. One folder, no subdirectories, no build step.
 
 ```
 app.py            FastAPI: API + indicators + alert loop + login + serves the page
@@ -95,7 +112,7 @@ the README for the recovery command if a pull ever removes it.
   bars and 6mo is only ~125 trading days. The intraday windows must stay well
   inside Yahoo's 60-day cap on 5m/15m history.
 - **The chart is hand-drawn SVG, no charting library.** Same reason as no React:
-  four files, no build step. It also means no drawing tools or pan/zoom, which
+  five files, no build step. It also means no drawing tools or pan/zoom, which
   is an accepted trade, not an oversight. Levels are drawn from the previous
   session regardless of the bar interval, so lines don't move between
   timeframes. Labels are suppressed (not the lines) where they would collide,

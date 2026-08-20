@@ -1,16 +1,37 @@
 # Pivot Desk
 
-Intraday signal dashboard for NSE and BSE stocks, scored on Camarilla pivots,
-moving averages and session VWAP. Profiles hold up to 30 stocks each.
+A personal intraday signal desk for NSE and BSE stocks. Everything works from
+**Camarilla pivots** taken from the previous session's high, low and close — the
+same levels Kite and Chartink compute — and does three separate things with them:
 
-**Four files, one folder, no npm.** The Python server also serves the web page,
+- **Scanner** — runs a Chartink contraction filter across **182 NSE F&O stocks**
+  on daily, 15-minute and 5-minute bars, finding names whose pivot band has
+  closed in on both sides, and ranks each hit by how tightly it has coiled.
+- **Buy list** — every F&O name trading above R3, grouped by whether it has also
+  cleared R4, sorted by how much room is left to run, with growth tracked from
+  the day it was first flagged.
+- **Signals** — scores your own watchlists from −3 to +3 on trend, session VWAP
+  and pivot position, and messages your phones over Telegram when a verdict
+  *changes* rather than on every refresh.
+
+Six pivot systems are selectable (Camarilla, Classic, Fibonacci, Woodie, DeMark,
+CPR) and the score, Scanner, Buy list and charts all follow the choice. Charts
+are hand-drawn SVG with the levels marked and session breaks ruled.
+
+**Five files, one folder, no npm.** The Python server also serves the web page,
 so there is one thing to run and one thing to deploy.
+
+Prices come from Yahoo and are **delayed and unofficial**. The score is
+arithmetic on past prices, not a prediction. The login is a gate over shared
+data, not real account security. And **it alerts — it never places an order**:
+you get a message and place the trade yourself.
 
 ---
 
 ## Run it on Windows
 
-1. Put all four files in one folder: `app.py`, `index.html`, `requirements.txt`, `run.bat`
+1. Put the files in one folder: `app.py`, `index.html`, `requirements.txt`,
+   `run.bat` (`render.yaml` is only needed for hosting)
 2. Double-click **`run.bat`**
 
 That's it. It creates the Python environment, installs what it needs, starts the
@@ -233,7 +254,8 @@ too close to label legibly the line is still drawn but the label is dropped, ban
 and PP first.
 
 This is drawn as plain SVG with no charting library, deliberately — the app is
-four files with no build step, and a CDN or npm dependency would end that. So it
+a handful of files with no build step, and a CDN or npm dependency would end
+that. So it
 is a chart for seeing where price sits against your levels, not a trading
 terminal. No drawing tools, no pan and zoom, and **Yahoo's data is delayed**, so
 it will not tick along with Kite.
