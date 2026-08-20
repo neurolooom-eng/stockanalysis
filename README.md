@@ -259,6 +259,22 @@ Expect *near* matches rather than exact ones: this app reads Yahoo, Kite reads
 the exchange feed, and a few paise of difference in yesterday's high shifts every
 level slightly. A large divergence means a data problem, not a formula problem.
 
+### Turning the Buy list into a watchlist
+
+**Add to watchlist** puts the whole list onto a watchlist in one click, so the
+score, the Telegram alerts and the history start tracking those names.
+
+The dropdown next to it chooses where they go. The default makes a new,
+date-stamped watchlist (`Buy list 20 Aug 14:35`); pick an existing one to add
+them there instead.
+
+It is safe to press twice. Names already on the watchlist are skipped and
+reported rather than duplicated, and nothing already there is removed. If the
+Buy list is longer than a watchlist can hold, the names go on **in the order
+shown** — freshest breaks first — and the ones that didn't fit are named in the
+message rather than dropped silently. Raise the cap in Settings if you want all
+of them.
+
 SELL and HOLD lists are backlog items — see below.
 
 ---

@@ -2286,6 +2286,81 @@ def buylist_read(limit: int = 200):
             "levels": [pretty_level(k) for k in breakout_keys]}
 
 
+class BuyListToWatchlist(BaseModel):
+    profile_id: Optional[int] = None   # None means "make a new one"
+    name: Optional[str] = None         # only used when creating
+
+
+@app.post("/api/buylist/to-watchlist")
+def buylist_to_watchlist(body: BuyListToWatchlist):
+    """
+    Put the current Buy list onto a watchlist in one go.
+
+    Existing names are skipped rather than erroring, and the caps are still
+    enforced - if the Buy list is longer than a watchlist can hold, the names
+    highest up the list go on and the rest are reported back rather than
+    silently dropped.
+    """
+    listing = buylist_read(limit=500)
+    buys = listing["buys"]
+    if not buys:
+        raise HTTPException(400, "The Buy list is empty. Run a sync first.")
+
+    stock_cap = caps()["max_stocks_per_profile"]
+    now = datetime.now().isoformat()
+
+    with db() as conn:
+        if body.profile_id is None:
+            name = (body.name or "").strip() or (
+                f"Buy list {datetime.now(IST).strftime('%d %b %H:%M')}")
+            profile_cap = caps()["max_profiles"]
+            existing = conn.execute("SELECT COUNT(*) FROM profiles").fetchone()[0]
+            if existing >= profile_cap:
+                raise HTTPException(
+                    400, f"You already have {existing} watchlists, and the cap is "
+                         f"{profile_cap}. Delete one, raise the cap in Settings, "
+                         f"or add these to a watchlist you already have.")
+            try:
+                cur = conn.execute(
+                    "INSERT INTO profiles (name, created_at) VALUES (?, ?)",
+                    (name, now))
+            except sqlite3.IntegrityError:
+                raise HTTPException(400, f"A watchlist named '{name}' already exists")
+            profile_id = cur.lastrowid
+            created = True
+        else:
+            row = conn.execute("SELECT name FROM profiles WHERE id = ?",
+                               (body.profile_id,)).fetchone()
+            if not row:
+                raise HTTPException(404, "Watchlist not found")
+            profile_id, name, created = body.profile_id, row["name"], False
+
+        held = {(r["symbol"], r["exchange"]) for r in conn.execute(
+            "SELECT symbol, exchange FROM watchlist WHERE profile_id = ?",
+            (profile_id,))}
+        count = len(held)
+
+        added, already, no_room = [], [], []
+        for b in buys:
+            pair = (b["symbol"], b["exchange"])
+            if pair in held:
+                already.append(b["symbol"])
+                continue
+            if count >= stock_cap:
+                no_room.append(b["symbol"])
+                continue
+            conn.execute(
+                "INSERT INTO watchlist (profile_id, symbol, exchange, added_at)"
+                " VALUES (?,?,?,?)", (profile_id, b["symbol"], b["exchange"], now))
+            held.add(pair)
+            count += 1
+            added.append(b["symbol"])
+
+    return {"profile_id": profile_id, "name": name, "created": created,
+            "added": added, "already_there": already, "no_room": no_room,
+            "cap": stock_cap, "total": len(buys)}
+
+
 @app.get("/api/scan/universe")
 def scan_universe():
     cfg = scanner_config()

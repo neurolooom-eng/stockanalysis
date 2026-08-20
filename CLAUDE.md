@@ -91,6 +91,10 @@ the README for the recovery command if a pull ever removes it.
   `RENDER_GIT_COMMIT` on Render, else `git rev-parse`, else app.py's mtime. It
   is served from `/api/health`, which is outside the login gate on purpose, so
   the owner can check which version is live without signing in.
+- **Buy list → watchlist is additive, never destructive.** One click, but it
+  skips names already there and reports them, keeps whatever else is on the
+  target watchlist, and respects the per-watchlist cap — filling from the top
+  of the list and naming what didn't fit. Don't "improve" it into a replace.
 - **"Contraction" means the inside-band test, not a narrow band.** The Scanner
   selects stocks where this bar's H3 < the previous bar's H3 **and** this bar's
   L3 > the previous bar's L3 — the band has closed in on both sides and sits

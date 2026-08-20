@@ -303,7 +303,7 @@ let profiles = [], active = null, stocks = [], limit = 30, starter = [], busy = 
 let view = 'signals', lastData = null, settings = null, hist = null, caps = {}, me = null;
 let strat = null;
 let scan = null, scanTf = localStorage.getItem('scanTf') || '1d', scanning = false;
-let buys = null, buying = false;
+let buys = null, buying = false, adding = false;
 let autoOn = localStorage.getItem('auto') === '1';
 let autoSecs = +(localStorage.getItem('autoSecs') || 60);
 let autoTimer = null;
@@ -793,6 +793,25 @@ async function runBuys(){
   finally{ buying = false; render(lastData); }
 }
 
+async function buysToWatchlist(){
+  if(adding) return;
+  const sel = $('#buyTarget');
+  const pid = sel && sel.value ? +sel.value : null;
+  adding = true;
+  render(lastData);
+  try{
+    const r = await api('/api/buylist/to-watchlist',
+      {method:'POST', body:JSON.stringify({profile_id: pid})});
+    let msg = `${r.added.length} added to ${r.name}`;
+    if(r.already_there.length) msg += ` · ${r.already_there.length} already there`;
+    if(r.no_room.length)
+      msg += ` · ${r.no_room.length} did not fit (cap ${r.cap})`;
+    toast(msg);
+    await loadProfiles();
+  }catch(e){ toast(e.message); }
+  finally{ adding = false; render(lastData); }
+}
+
 function renderBuys(){
   const lv = (buys && buys.levels) || ['R3', 'R4'];
   const sysName = (buys && buys.pivot_label) || 'Camarilla';
@@ -805,6 +824,13 @@ function renderBuys(){
     <div class="row" style="margin-top:14px">
       <button class="btn solid" onclick="runBuys()" ${buying ? 'disabled' : ''}>
         ${buying ? 'Checking…' : 'Sync now'}</button>
+      ${buys && buys.buys && buys.buys.length ? `
+        <button class="btn" onclick="buysToWatchlist()" ${adding ? 'disabled' : ''}>
+          ${adding ? 'Adding…' : 'Add to watchlist'}</button>
+        <select id="buyTarget" class="btn">
+          <option value="">New watchlist, dated</option>
+          ${profiles.map(p => `<option value="${p.id}">Add to ${esc(p.name)}</option>`).join('')}
+        </select>` : ''}
       ${buys && buys.scanned_at
         ? `<span class="hint">Last checked ${stamp(buys.scanned_at)}${
             buys.market_open ? '' : ' · market shut, so this is the last close'}</span>`
@@ -849,6 +875,10 @@ function renderBuys(){
         <th>${esc(buys.buys[0]?.h4_name || topLevel)}</th><th>Turnover</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
+    <p class="hint"><b>Add to watchlist</b> puts these names on a watchlist so the
+      score, alerts and history start tracking them. They go on in the order shown,
+      so if there are more than a watchlist holds, the freshest breaks go on first
+      and the rest are reported rather than dropped quietly.</p>
     <p class="lede"><b>Sorted by how recently it broke, not how far it has run.</b>
       A stock 0.1% over R3 has just crossed; one 4% over crossed a while ago and
       the move you would be buying has largely happened. <b>coiled</b> marks names
