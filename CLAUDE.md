@@ -35,7 +35,8 @@ render.yaml       Render blueprint, so hosting needs no form-filling
 
 `app.py` serves `index.html` at `/`, so it's a single service to run and a single
 service to deploy. Storage is SQLite (`profiles`, `watchlist`, `signal_log`,
-`settings`, `users`). Data comes from yfinance.
+`settings`, `users`, `candidates`, `trades`, `scan_hits`, `breakouts`). Data
+comes from yfinance.
 
 Start: double-click `run.bat`, or `venv\Scripts\python.exe app.py`.
 
@@ -118,7 +119,8 @@ the README for the recovery command if a pull ever removes it.
   they are not dependable.
 - Exchange holidays are not modelled — the market-hours check is weekday plus
   09:15–15:30 IST only.
-- No authentication. Anyone with the URL can see and edit everything.
+- The login is a gate, not real account security: two shared accounts, weak
+  passwords, no lockout, both users see the same data.
 - Hit rate is measured at bar closes on delayed data with no costs modelled. It
   describes what the score did; it is not a backtest.
 
@@ -140,13 +142,18 @@ Not active work. The owner sets the order; don't start any of these unasked.
      symbol"; they are not the same and only the second should alert.
    - **Hosting is the real blocker**, not the code. A free host that sleeps
      when idle cannot do dependable 15-minute alerts.
-2. **Proper accounts** (owner's own backlog item): password-change screen,
+2. **SELL and HOLD lists.** The owner asked for BUY first and explicitly moved
+   these to the backlog. BUY is "any F&O name above R3 or R4"; SELL is the
+   mirror (below L3 / L4) and HOLD is everything inside the band. Reuse
+   `scan_breakouts()` with the levels flipped rather than writing a second
+   scanner.
+3. **Proper accounts** (owner's own backlog item): password-change screen,
    per-user private watchlists, real passwords, rate-limited sign-in.
-3. **Broker feed** (Zerodha Kite / Angel One / Dhan) for genuinely live prices.
+4. **Broker feed** (Zerodha Kite / Angel One / Dhan) for genuinely live prices.
    Only `analyse()` needs to change.
-4. **Holiday calendar** for the alert loop.
-5. **Alert thresholds** — signal types or score levels worth messaging about.
-6. **Refresh the F&O list** against NSE's published segment list. It is typed
+5. **Holiday calendar** for the alert loop.
+6. **Alert thresholds** — signal types or score levels worth messaging about.
+7. **Refresh the F&O list** against NSE's published segment list. It is typed
    into `app.py` and drifts as NSE revises it.
 
 ## House rules

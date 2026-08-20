@@ -239,6 +239,7 @@ td.sig .BUY{color:var(--up)} td.sig .SELL{color:var(--down)} td.sig .HOLD{color:
   <span class="tagline">CAMARILLA / MA / VWAP &nbsp;—&nbsp; NSE &amp; BSE</span>
   <nav class="views" id="views">
     <button data-view="signals" aria-current="true" onclick="go('signals')">Signals</button>
+    <button data-view="buylist" onclick="go('buylist')">Buy list</button>
     <button data-view="scanner" onclick="go('scanner')">Scanner</button>
     <button data-view="strategy" onclick="go('strategy')">Strategy</button>
     <button data-view="history" onclick="go('history')">History</button>
@@ -276,6 +277,7 @@ let profiles = [], active = null, stocks = [], limit = 30, starter = [], busy = 
 let view = 'signals', lastData = null, settings = null, hist = null, caps = {}, me = null;
 let strat = null;
 let scan = null, scanTf = localStorage.getItem('scanTf') || '1d', scanning = false;
+let buys = null, buying = false;
 let autoOn = localStorage.getItem('auto') === '1';
 let autoSecs = +(localStorage.getItem('autoSecs') || 60);
 let autoTimer = null;
@@ -350,6 +352,7 @@ function go(v){
   if(v === 'settings') return loadSettings();
   if(v === 'strategy') return loadStrategy();
   if(v === 'scanner') return loadScan();
+  if(v === 'buylist') return loadBuys();
   render(lastData);
 }
 
@@ -581,6 +584,89 @@ function renderHistory(){
 }
 
 /* ---------------- strategy ---------------- */
+/* ---------------- buy list (above R3 / R4) ---------------- */
+async function loadBuys(){
+  try{ buys = await api('/api/buylist'); }
+  catch(e){ toast(e.message); buys = null; }
+  render(lastData);
+}
+
+async function runBuys(){
+  if(buying) return;
+  buying = true;
+  render(lastData);
+  toast('Checking the F&O list for breaks above R3 / R4…');
+  try{
+    const r = await api('/api/buylist/run', {method:'POST'});
+    let msg = `${r.buys.length} above R3 of ${r.scanned} scanned`;
+    if(r.skipped_illiquid) msg += ` · ${r.skipped_illiquid} too thin`;
+    if(r.failed.length)    msg += ` · ${r.failed.length} no data`;
+    toast(msg);
+    buys = null;
+    await loadBuys();
+  }catch(e){ toast(e.message); }
+  finally{ buying = false; render(lastData); }
+}
+
+function renderBuys(){
+  const head = `<section class="panel">
+    <h2>Buy list</h2>
+    <p class="lede">Every F&amp;O stock trading <b>above R3</b>, and the stronger
+      ones above <b>R4</b>. R3 and R4 are the Camarilla H3 and H4, taken from the
+      previous completed session — the same levels the Signals cards use.</p>
+    <div class="row" style="margin-top:14px">
+      <button class="btn solid" onclick="runBuys()" ${buying ? 'disabled' : ''}>
+        ${buying ? 'Checking…' : 'Sync now'}</button>
+      ${buys && buys.scanned_at
+        ? `<span class="hint">Last checked ${stamp(buys.scanned_at)}${
+            buys.market_open ? '' : ' · market shut, so this is the last close'}</span>`
+        : ''}
+    </div>`;
+
+  if(!buys) return head + `<div class="empty"><p>Loading…</p></div></section>`;
+
+  if(!buys.buys.length){
+    return head + `<div class="empty"><p>Nothing above R3 in the last check.
+      Press <b>Sync now</b> to scan ${buys.universe_size} F&amp;O symbols.</p>
+      </div></section>`;
+  }
+
+  const rows = buys.buys.map(b => `<tr>
+      <td><b>${esc(b.symbol)}</b>${b.coiled
+        ? ' <span class="chip" style="padding:2px 8px;font-size:11px">coiled</span>'
+        : ''}</td>
+      <td class="sig"><b class="BUY">${esc(b.level_name)}</b></td>
+      <td>${money(b.price)}</td>
+      <td>${money(b.level_price)}</td>
+      <td class="up">+${b.above_pct}%</td>
+      <td>${money(b.h3)}</td>
+      <td>${money(b.h4)}</td>
+      <td>${b.turnover_cr == null ? '—' : b.turnover_cr + ' cr'}</td>
+    </tr>`).join('');
+
+  const r4 = buys.buys.filter(b => b.level_name === 'R4').length;
+  const coiled = buys.buys.filter(b => b.coiled).length;
+
+  return head + `
+    <div class="cards" style="margin-top:14px">
+      <div class="stat"><b class="up">${buys.buys.length}</b><span>above R3</span></div>
+      <div class="stat"><b class="up">${r4}</b><span>above R4</span></div>
+      <div class="stat"><b>${coiled}</b><span>also coiled</span></div>
+      <div class="stat"><b>${buys.universe_size}</b><span>symbols scanned</span></div>
+    </div>
+    <table style="margin-top:14px">
+      <thead><tr><th>Symbol</th><th>Level</th><th>Price</th><th>Level at</th>
+        <th>Above by</th><th>R3</th><th>R4</th><th>Turnover</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <p class="lede"><b>Sorted by how recently it broke, not how far it has run.</b>
+      A stock 0.1% over R3 has just crossed; one 4% over crossed a while ago and
+      the move you would be buying has largely happened. <b>coiled</b> marks names
+      that are also contracting — a break out of a coil is the more interesting of
+      the two. Yahoo data is delayed and this places no orders.</p>
+  </section>`;
+}
+
 /* ---------------- contraction scanner ---------------- */
 const TF_LABEL = {'1d':'Daily', '15m':'15 min', '5m':'5 min'};
 
@@ -674,6 +760,10 @@ function renderScanner(){
       be argued with rather than trusted. It measures how tightly a stock has coiled
       — <b>not</b> which way it will break. Yahoo data is delayed and this places no
       orders.</p>
+    <p class="hint">The contraction test itself compares just <b>two bars</b>, the
+      last completed one against the one before it. The rank looks back further:
+      20 bars for volume dry-up and the average, 4 and 7 for NR4/NR7, and the
+      streak runs back as far as the band keeps narrowing.</p>
   </section>`;
 }
 
@@ -1049,6 +1139,7 @@ function render(data){
   const el = $('#body');
   if(active && view === 'history'){ el.innerHTML = renderHistory(); return; }
   if(view === 'settings'){ el.innerHTML = renderSettings(); return; }
+  if(view === 'buylist'){ el.innerHTML = renderBuys(); return; }
   if(view === 'scanner'){ el.innerHTML = renderScanner(); return; }
   if(view === 'strategy'){ el.innerHTML = renderStrategy(); return; }
   if(!active){
