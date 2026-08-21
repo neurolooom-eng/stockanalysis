@@ -185,6 +185,60 @@ saved.
 
 ---
 
+## AI analysis
+
+**Ask AI** on any row of the Buy list or Scanner, or any Signals card, sends
+that stock's numbers to a language model and gets back a short read-out ending
+in **BUY**, **WATCH** or **AVOID**.
+
+**Analyse all with AI** on the watchlist does the whole list. It is offered
+*only* there, deliberately: the Buy list and Scanner can run to a hundred names,
+and that would be a hundred paid calls from one click. A confirmation tells you
+how many calls it is about to make.
+
+### Your key, your bill
+
+**Settings → AI analysis.** Each account stores its own provider, model and key,
+so `pnk`, `kau`, `kaushik` and `jana` each pay for their own usage and nobody
+can spend someone else's credit. The key is kept in the database on this machine
+and is never sent back to the page in full — only the last four characters, the
+same as the Telegram token.
+
+Both **Anthropic** and **OpenAI** work. The model dropdown is filled by asking
+the provider what it currently serves, rather than from a list frozen into this
+app — both ship models faster than this code gets updated.
+
+You will need to `pip install -r requirements.txt` once to pull in the SDKs.
+They are imported only when you actually run an analysis, so the app runs
+perfectly well without them if you never use this.
+
+### What it is, and what it is not
+
+The model is given exactly what you can see: the levels, where price sits
+against them, the band, the contraction, volume, the moving averages, VWAP and
+the desk's own score with its reasons. It has **no news, no fundamentals, no
+order book and no live quote**, and the prices it reads are delayed. It is
+instructed to say so rather than invent a reason.
+
+**It is not part of the score.** The score is arithmetic you can check line by
+line; this is a model's reading of the same numbers, and the two will sometimes
+disagree. The panel keeps them visually separate and says which is which. It is
+not advice, and it places no orders.
+
+---
+
+## Sorting
+
+Every column header with an arrow sorts. Click to sort, click again to reverse.
+Your choice is remembered per table, so it survives a refresh.
+
+The **defaults are the orderings each list was designed around** — the Buy list
+by room to the next level, the Scanner by coil rank — so an untouched table
+looks exactly as it always did. Missing values always sink to the bottom
+whichever way the sort points, rather than clustering at the top.
+
+---
+
 ## Choosing a pivot system
 
 **Settings → Pivot system** picks the maths everything runs on. The Signals

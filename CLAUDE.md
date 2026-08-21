@@ -141,6 +141,33 @@ the README for the recovery command if a pull ever removes it.
   themselves. This is deliberately *not* the same as sorting by `above_pct`:
   the R3→R4 gap scales with the previous day's range, so the two orderings
   genuinely disagree across stocks. Don't "simplify" one into the other.
+- **The AI commentary is not the score, and the UI must keep saying so.** The
+  owner asked for an explicit BUY/WATCH/AVOID call after being told it sits
+  awkwardly beside a score the app insists is arithmetic rather than advice.
+  That was their call to make, so it ships — but the verdict is rendered
+  separately from the score, both are shown together, and the panel states
+  plainly that a model wrote it, that it has no news or live prices, and that
+  the two will sometimes disagree. Don't quietly merge the two numbers.
+- **AI keys are per account**, on the `users` row, never in `settings`. Each of
+  the four pays for their own usage. `ai_public()` returns only the last four
+  characters; the key itself must never reach the page.
+- **No model list is hardcoded.** Both providers ship models faster than this
+  file gets updated — the dropdown is filled from the provider's own `/models`
+  endpoint with the user's key. Resist the urge to "helpfully" add a fallback
+  list of names; it will be wrong within months.
+- **Both SDKs are imported inside the call**, not at module scope. Someone who
+  never configures a key must not have to install either, and the app has to
+  keep starting if both are absent.
+- **OpenAI takes `max_completion_tokens`, not `max_tokens`** — the older name
+  is rejected by their reasoning models. Anthropic takes `max_tokens`.
+- **"Analyse all" is watchlist-only, on purpose.** The Buy list and Scanner can
+  hold a hundred names, and one click should not be able to fire a hundred paid
+  calls. It also runs sequentially: providers rate-limit hard on burst, and one
+  failure is reported against its own symbol rather than losing the run.
+- **Sorting is one mechanism for every table** (`sortRows` / `sortableTh`),
+  with per-table defaults matching the ordering each list was designed around,
+  so an untouched table looks unchanged. Nulls always sink regardless of
+  direction.
 - **Percent and rupees are two views of the same two numbers**, toggled in the
   Buy list and remembered per browser. Percent is what return depends on and
   the only fair comparison across price levels; rupees is what moves in the

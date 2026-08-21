@@ -236,6 +236,20 @@ td.sig .BUY{color:var(--up)} td.sig .SELL{color:var(--down)} td.sig .HOLD{color:
 /* Divider between the interval chips and the bar-count chips. */
 .axsep{display:inline-block;width:1px;height:20px;background:var(--rule);
   margin:0 4px;vertical-align:middle}
+th.sortable{cursor:pointer;user-select:none;white-space:nowrap}
+th.sortable:hover{color:var(--paper)}
+th.sortable.on{color:var(--brass)}
+.btn.tiny{padding:3px 8px;font-size:11px}
+.ailabel{color:var(--dim);letter-spacing:.08em;font-size:11px;margin-right:6px}
+.aicall{color:var(--brass);letter-spacing:.08em;font-size:11px;margin-right:6px}
+/* The existing tag colours are scoped as ".buy .tag" - a descendant rule that
+   needs a wrapping card. The AI verdict badge stands on its own, so it needs
+   these standalone equivalents. */
+h3 .tag{font-family:var(--cond);font-size:12px;font-weight:700;padding:2px 9px;
+  letter-spacing:.06em;vertical-align:middle;margin-left:6px}
+.tag.buy{background:var(--up);color:#06170E}
+.tag.sell{background:var(--down);color:#1D0806}
+.tag.hold{background:var(--panel-2);color:var(--muted);border:1px solid var(--rule)}
 .candles{width:100%;min-width:520px;height:auto;display:block}
 .sym.click{cursor:pointer;text-decoration:underline;text-decoration-style:dotted;
   text-underline-offset:3px}
@@ -400,6 +414,7 @@ async function start(){
   try{
     me = (await api('/api/me')).user;
     $('#gate').hidden = true;
+    await loadAi();          // per-account, so it must follow sign-in
     await loadProfiles();
   }catch(e){ showGate(); }
 }
@@ -654,6 +669,11 @@ function card(s){
       ${growthSpan(s)}
     </div>
     <div class="why">${why}</div>
+    <div class="row" style="margin:8px 0 0">
+      <button class="btn ghost tiny"
+        onclick="aiAnalyse('${esc(s.symbol)}','${esc(s.exchange)}','watchlist')"
+        >Ask AI</button>
+    </div>
     <p class="foot">${s.basis} · ${new Date(s.as_of).toLocaleString('en-IN',
       {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit'})}</p>
   </article>`;
@@ -1015,6 +1035,197 @@ function renderAbout(){
   </section>`;
 }
 
+/* ---------------- AI commentary ----------------
+   Kept visually distinct from the score on purpose. The score is arithmetic
+   you can check line by line; this is a language model's read of the same
+   numbers, and the two will sometimes disagree. */
+let ai = null, aiBusy = false, aiModels = [];
+
+async function loadAi(){
+  try{ ai = await api('/api/ai'); }
+  catch(e){ ai = null; }
+}
+
+async function saveAi(patch){
+  try{
+    ai = await api('/api/ai', {method:'POST', body:JSON.stringify(patch)});
+    toast('Saved.');
+    if(patch.provider) aiModels = [];   // model lists differ per provider
+    render(lastData);
+  }catch(e){ toast(e.message); }
+}
+
+function saveAiKey(){
+  const v = $('#aiKey').value.trim();
+  if(!v) return toast('Paste a key first.');
+  $('#aiKey').value = '';
+  saveAi({key: v});
+}
+
+function clearAiKey(){
+  if(!confirm('Forget the saved API key for this account?')) return;
+  aiModels = [];
+  saveAi({key: ''});
+}
+
+async function loadAiModels(){
+  toast('Asking the provider what it serves…');
+  try{
+    const r = await api('/api/ai/models');
+    aiModels = r.models || [];
+    toast(`${aiModels.length} models available.`);
+    render(lastData);
+  }catch(e){ toast(e.message); }
+}
+
+function aiPanel(title, bodyHtml){
+  $('#chartWrap').hidden = false;
+  $('#chartTitle').textContent = title;
+  $('#chartTabs').innerHTML = '';
+  $('#chartBody').innerHTML = bodyHtml;
+}
+
+/* The model writes READ / WATCH / CALL lines. Render them as labelled blocks
+   so the verdict is findable without reading the whole thing. */
+function aiText(text){
+  return esc(text).split('\n').filter(l => l.trim()).map(line => {
+    const m = line.match(/^\s*(READ|WATCH|CALL)\s*:\s*(.*)$/i);
+    if(!m) return `<p class="lede">${line}</p>`;
+    const tag = m[1].toUpperCase();
+    const cls = tag === 'CALL' ? 'aicall' : 'ailabel';
+    return `<p class="lede"><b class="${cls}">${tag}</b> ${m[2]}</p>`;
+  }).join('');
+}
+
+function aiCard(r){
+  const v = (r.verdict || '').toUpperCase();
+  const badge = v ? `<span class="tag ${v === 'BUY' ? 'buy'
+    : v === 'AVOID' ? 'sell' : 'hold'}">${v}</span>` : '';
+  return `<section style="border-top:1px solid var(--rule);padding-top:12px;margin-top:12px">
+    <div class="row" style="justify-content:space-between;align-items:baseline">
+      <h3 style="margin:0">${esc(r.symbol)} ${badge}</h3>
+      <span class="hint">desk score ${esc(r.signal)} ${r.score}/3 · ${money(r.price)}</span>
+    </div>
+    ${aiText(r.text)}
+  </section>`;
+}
+
+const AI_FOOT = `<p class="hint" style="margin-top:16px">Written by a language
+  model from the numbers above — <b>not</b> part of the desk's score, which is
+  arithmetic you can check line by line. The two will sometimes disagree. It has
+  no news, no fundamentals and no live quote, and the prices it read are
+  delayed. Nothing here is advice, and nothing here places an order.</p>`;
+
+async function aiAnalyse(symbol, exchange, source){
+  if(aiBusy) return;
+  if(!ai || !ai.configured){
+    aiPanel('AI analysis', `<p class="lede">No API key saved for
+      <b>${esc(me || 'this account')}</b> yet. Add one in
+      <b>Settings → AI analysis</b> — each account uses its own key and pays for
+      its own usage.</p>`);
+    return;
+  }
+  aiBusy = true;
+  aiPanel(symbol, '<p class="hint">Asking ' + esc(ai.model || ai.provider) + '…</p>');
+  try{
+    const r = await api('/api/ai/analyse', {method:'POST',
+      body:JSON.stringify({symbol, exchange, source})});
+    aiPanel(symbol, aiCard(r)
+      + `<p class="hint">${esc(r.provider)} · ${esc(r.model)} · ${stamp(r.generated_at)}</p>`
+      + AI_FOOT);
+  }catch(e){
+    aiPanel(symbol, `<p class="lede">Could not analyse: ${esc(e.message)}</p>`);
+  }finally{ aiBusy = false; }
+}
+
+async function aiAnalyseAll(){
+  if(aiBusy || !active) return;
+  if(!ai || !ai.configured){
+    toast('Add your API key in Settings → AI analysis first.');
+    return;
+  }
+  const n = stocks.length;
+  if(!n) return toast('Nothing on this watchlist yet.');
+  if(!confirm(`Analyse all ${n} stocks with ${ai.model || ai.provider}?\n\n`
+    + `That is ${n} separate API calls billed to your own key, and takes a `
+    + `while — they run one at a time to avoid being rate-limited.`)) return;
+
+  aiBusy = true;
+  aiPanel('Analysing…', `<p class="hint">Working through ${n} stocks one at a
+    time. This stays open while it runs.</p>`);
+  try{
+    const r = await api('/api/ai/analyse-all/' + active, {method:'POST'});
+    const cards = r.analysed.map(aiCard).join('') || '<p class="lede">Nothing came back.</p>';
+    const bad = r.failed.length
+      ? `<p class="hint">Failed: ${r.failed.map(f =>
+          esc(f.symbol) + ' (' + esc(f.error) + ')').join(', ')}</p>`
+      : '';
+    aiPanel(`${r.analysed.length} of ${r.count} analysed`, cards + bad + AI_FOOT);
+  }catch(e){
+    aiPanel('AI analysis', `<p class="lede">Could not run: ${esc(e.message)}</p>`);
+  }finally{ aiBusy = false; }
+}
+
+/* ---------------- sorting ----------------
+   One mechanism for every table. Each table names its default column and
+   direction; clicking a header sorts by it, clicking again reverses. The
+   choice is remembered per table so a sort survives a refresh.
+
+   Defaults are the orderings the lists were designed around - the Buy list by
+   room to the next level, the Scanner by coil rank - so an untouched table
+   looks exactly as it did before sorting existed. */
+const SORT_DEFAULTS = {
+  buys:    {key: 'room_pct',   dir: -1},
+  scanner: {key: 'rank_score', dir: -1},
+};
+let sortState = {};
+try{ sortState = JSON.parse(localStorage.getItem('sortState') || '{}'); }
+catch(e){ sortState = {}; }
+
+function sortFor(table){
+  return sortState[table] || SORT_DEFAULTS[table] || {key: null, dir: 1};
+}
+
+function setSort(table, key){
+  const cur = sortFor(table);
+  // Same column again reverses; a new column starts descending for numbers,
+  // which is what you want nearly every time on this kind of data.
+  const dir = cur.key === key ? -cur.dir : -1;
+  sortState[table] = {key, dir};
+  localStorage.setItem('sortState', JSON.stringify(sortState));
+  render(lastData);
+}
+
+function resetSort(table){
+  delete sortState[table];
+  localStorage.setItem('sortState', JSON.stringify(sortState));
+  render(lastData);
+}
+
+function sortRows(rows, table){
+  const {key, dir} = sortFor(table);
+  if(!key) return rows;
+  return rows.slice().sort((a, b) => {
+    const x = a[key], y = b[key];
+    // Missing values always sink, whichever way the sort is pointing.
+    if(x == null && y == null) return 0;
+    if(x == null) return 1;
+    if(y == null) return -1;
+    if(typeof x === 'number' && typeof y === 'number') return (x - y) * dir;
+    return String(x).localeCompare(String(y)) * dir;
+  });
+}
+
+/* A <th> that sorts. Shows which column is active and which way. */
+function sortableTh(table, key, label){
+  const cur = sortFor(table);
+  const on = cur.key === key;
+  const arrow = on ? (cur.dir === -1 ? ' ▾' : ' ▴') : '';
+  return `<th class="sortable${on ? ' on' : ''}"
+    onclick="setSort('${table}','${key}')"
+    title="Sort by ${esc(label)}">${label}${arrow}</th>`;
+}
+
 /* ---------------- buy list (above R3 / R4) ---------------- */
 async function loadBuys(){
   try{ buys = await api('/api/buylist'); }
@@ -1173,7 +1384,7 @@ function renderBuys(){
       on the list in total.</p></div></section>`;
   }
 
-  const rows = shown.map(b => `<tr>
+  const rows = sortRows(shown, 'buys').map(b => `<tr>
       <td><b class="click" onclick="openChart('${esc(b.symbol)}','${esc(b.exchange)}')">${esc(b.symbol)}</b>${b.coiled
         ? ' <span class="chip" style="padding:2px 8px;font-size:11px">coiled</span>'
         : ''}</td>
@@ -1187,6 +1398,9 @@ function renderBuys(){
       <td>${money(b.h3)}</td>
       <td>${money(b.h4)}</td>
       <td>${b.turnover_cr == null ? '—' : b.turnover_cr + ' cr'}</td>
+      <td><button class="btn ghost tiny"
+        onclick="aiAnalyse('${esc(b.symbol)}','${esc(b.exchange)}','buylist')"
+        >Ask AI</button></td>
     </tr>`).join('');
 
   const r4 = nUpper;
@@ -1202,11 +1416,19 @@ function renderBuys(){
       <div class="stat"><b>${buys.universe_size}</b><span>symbols scanned</span></div>
     </div>
     <table style="margin-top:14px">
-      <thead><tr><th>Symbol</th><th>Level</th><th>Price</th><th>Level at</th>
-        <th>Above by</th><th>Room to ${esc(topLevel)}</th>
-        <th>Today</th><th>Since flagged</th>
+      <thead><tr>
+        ${sortableTh('buys', 'symbol', 'Symbol')}
+        ${sortableTh('buys', 'level_name', 'Level')}
+        ${sortableTh('buys', 'price', 'Price')}
+        ${sortableTh('buys', 'level_price', 'Level at')}
+        ${sortableTh('buys', 'above_pct', 'Above by')}
+        ${sortableTh('buys', 'room_pct', 'Room to ' + topLevel)}
+        ${sortableTh('buys', 'today_pct', 'Today')}
+        ${sortableTh('buys', 'since_pct', 'Since flagged')}
         <th>${esc(buys.buys[0]?.h3_name || lv[0])}</th>
-        <th>${esc(buys.buys[0]?.h4_name || topLevel)}</th><th>Turnover</th></tr></thead>
+        <th>${esc(buys.buys[0]?.h4_name || topLevel)}</th>
+        ${sortableTh('buys', 'turnover_cr', 'Turnover')}
+        <th></th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     ${lv.length > 1 ? `<p class="hint"><b>${esc(lv[0])} not ${esc(topLevel)}</b> is
@@ -1311,7 +1533,7 @@ function renderScanner(){
       Press <b>Sync now</b> to scan ${scan.universe_size} symbols.</p></div></section>`;
   }
 
-  const rows = scan.hits.map(h => {
+  const rows = sortRows(scan.hits, 'scanner').map(h => {
     const chips = (h.rules || []).map(r =>
       `<span class="chip" style="padding:2px 8px;font-size:11px"
         title="+${r.weight}">${esc(r.text)}</span>`).join(' ');
@@ -1325,6 +1547,9 @@ function renderScanner(){
       <td>${h.depth_pct}%</td>
       <td>${h.streak}</td>
       <td>${chips || '<span class="open">—</span>'}</td>
+      <td><button class="btn ghost tiny"
+        onclick="aiAnalyse('${esc(h.symbol)}','${esc(h.exchange)}','scanner')"
+        >Ask AI</button></td>
     </tr>`;
   }).join('');
 
@@ -1338,8 +1563,15 @@ function renderScanner(){
         <span>last sync</span></div>
     </div>
     <table style="margin-top:14px">
-      <thead><tr><th>Symbol</th><th>Rank</th><th>Price</th><th>H3 / L3</th>
-        <th>Band</th><th>Tighter by</th><th>Streak</th><th>Why it ranks</th></tr></thead>
+      <thead><tr>
+        ${sortableTh('scanner', 'symbol', 'Symbol')}
+        ${sortableTh('scanner', 'rank_score', 'Rank')}
+        ${sortableTh('scanner', 'price', 'Price')}
+        <th>${esc(scan.band_label || 'R3 / S3')}</th>
+        ${sortableTh('scanner', 'band_pct', 'Band')}
+        ${sortableTh('scanner', 'depth_pct', 'Tighter by')}
+        ${sortableTh('scanner', 'streak', 'Streak')}
+        <th>Why it ranks</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     <p class="lede">Rank is additive and every point is listed, so a high score can
@@ -1559,7 +1791,8 @@ function renderSettings(){
   return `<section class="panel">
     <h2>Settings</h2>
     <p class="lede">Everything here is stored in the database on this machine.
-      Both accounts share it, so a change here changes it for both of you.</p>
+      All four accounts share it, so a change here changes it for everyone —
+      except the AI key below, which is yours alone.</p>
 
     <h3>Telegram alerts</h3>
     <p class="lede">Message @BotFather on Telegram, send <b>/newbot</b>, and paste the
@@ -1604,6 +1837,46 @@ function renderSettings(){
 
     <h3>Alert these watchlists</h3>
     <div class="row">${perList}</div>
+
+    <h3>AI analysis</h3>
+    <p class="lede">Your own key, your own bill. Each account stores its own, so
+      nothing here is shared with the other three. The key is kept in the database
+      on this machine and never sent back to this page in full.</p>
+    <div class="row">
+      <label for="aiProv">Provider</label>
+      <select id="aiProv" class="btn" onchange="saveAi({provider:this.value})">
+        <option value="anthropic" ${(ai && ai.provider) === 'anthropic' ? 'selected' : ''}
+          >Anthropic (Claude)</option>
+        <option value="openai" ${(ai && ai.provider) === 'openai' ? 'selected' : ''}
+          >OpenAI</option>
+      </select>
+      <span class="hint">${ai && ai.configured
+        ? 'Key saved, ending ' + esc(ai.key_hint)
+        : 'No key saved yet.'}</span>
+    </div>
+    <div class="row">
+      <label for="aiKey">API key</label>
+      <input type="password" id="aiKey" placeholder="${ai && ai.configured
+        ? 'Saved — type a new one to replace it' : 'sk-… / sk-ant-…'}">
+      <button class="btn" onclick="saveAiKey()">Save key</button>
+      ${ai && ai.configured
+        ? '<button class="btn ghost" onclick="clearAiKey()">Forget it</button>' : ''}
+    </div>
+    <div class="row">
+      <label for="aiModel">Model</label>
+      <select id="aiModel" class="btn" onchange="saveAi({model:this.value})">
+        ${(aiModels.length ? aiModels : [(ai && ai.model) || '']).filter(Boolean)
+          .map(m => `<option ${(ai && ai.model) === m ? 'selected' : ''}
+            >${esc(m)}</option>`).join('') || '<option value="">— none loaded —</option>'}
+      </select>
+      <button class="btn" onclick="loadAiModels()">Load models</button>
+      <span class="hint">The list comes from the provider itself, so it is
+        always current rather than a list frozen into this app.</span>
+    </div>
+    <p class="hint">Each analysis is one paid API call on your key, and
+      <b>Analyse all</b> is one per stock on the watchlist. The commentary is a
+      language model reading the same numbers you can see — it is not part of the
+      score, it has no news or live prices, and it places no orders.</p>
 
     <h3>Pivot system</h3>
     <p class="lede">Which pivot maths everything runs on — the Signals cards, the
@@ -1799,6 +2072,13 @@ function render(data){
       <button class="btn ghost" onclick="delProfile()">Delete watchlist</button>
       <button class="btn solid" onclick="refresh()" ${busy || !stocks.length ? 'disabled' : ''}>
         ${busy ? 'Reading the tape…' : 'Run signals'}</button>
+      <!-- Only the watchlist offers a whole-list run. The Buy list and the
+           Scanner can hold a hundred names, and that would be a hundred paid
+           API calls from one click. -->
+      <button class="btn" onclick="aiAnalyseAll()"
+        ${aiBusy || !stocks.length ? 'disabled' : ''}
+        title="One API call per stock, billed to your own key"
+        >${aiBusy ? 'Analysing…' : 'Analyse all with AI'}</button>
     </div>
     ${data ? `<p class="foot" style="margin:-8px 0 12px">Last run ${stamp(data.generated_at)}${
       autoOn ? ` · refreshing every ${autoSecs < 60 ? autoSecs + 's' : autoSecs/60 + 'm'}` : ''}</p>` : ''}
