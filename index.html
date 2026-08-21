@@ -227,6 +227,9 @@ td.sig .BUY{color:var(--up)} td.sig .SELL{color:var(--down)} td.sig .HOLD{color:
 /* Build stamp sits under the disclaimer with no second rule above it. */
 .note.build{border-top:0;margin-top:8px;padding-top:0;opacity:.75}
 .note.build b{color:var(--brass);font-weight:400}
+.refreshBtn{color:var(--brass);cursor:pointer;text-decoration:underline;
+  font-size:11px;padding:0;background:none;border:none}
+.refreshBtn:hover{opacity:.7}
 .chartwrap{position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:30;
   display:flex;align-items:center;justify-content:center;padding:18px}
 .chartwrap[hidden]{display:none}
@@ -432,8 +435,12 @@ async function loadBuild(){
     $('#build').innerHTML =
       `Build <b>${esc(r.build)}</b>`
       + (changed ? ` · code ${esc(fmt(changed))}` : '')
-      + (started ? ` · running since ${esc(fmt(started))}` : '');
+      + (started ? ` · running since ${esc(fmt(started))}` : '')
+      + ' · <button class="refreshBtn" onclick="hardRefresh()" title="Hard refresh to bypass cache">Refresh</button>';
   }catch(e){ $('#build').textContent = 'Build unknown — server unreachable.'; }
+}
+function hardRefresh(){
+  location.reload(true);
 }
 loadBuild();
 

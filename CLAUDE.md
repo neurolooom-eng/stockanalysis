@@ -297,6 +297,25 @@ Not active work. The owner sets the order; don't start any of these unasked.
 7. **Refresh the F&O list** against NSE's published segment list. It is typed
    into `app.py` and drifts as NSE revises it.
 
+## Documentation split
+
+**About tab** explains the app's principles and limits: what each list is and how
+it works, the score's three tests, the six pivot systems with a live-choice
+indicator and amber warning for non-Camarilla, and four hard limits (never
+places orders, prices are delayed, no predictions, login is not security).
+Users open this tab when they need to understand what they are looking at
+without leaving the browser. It tracks settings live — switch to CPR and the
+About tab immediately shows the warning.
+
+**README in the repo** covers procedures: how to install and run locally, Telegram
+setup, what caps are selectable in Settings, deployment via `render.yaml`,
+database recovery if a git pull removes it, and symbol counts and test details.
+An administrator reads this when setting up the app; a user doesn't need it
+while running.
+
+Don't expand one into the other — they will drift as soon as they are conflated,
+and the user will follow whichever is easier to find (the browser tab).
+
 ## House rules
 
 - Test before claiming something works. Indicator maths should be checked against
