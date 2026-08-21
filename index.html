@@ -260,6 +260,7 @@ tbody tr td b.click{cursor:pointer;text-decoration:underline;
     <button data-view="scanner" onclick="go('scanner')">Scanner</button>
     <button data-view="strategy" onclick="go('strategy')">Strategy</button>
     <button data-view="history" onclick="go('history')">History</button>
+    <button data-view="about" onclick="go('about')">About</button>
     <button data-view="settings" onclick="go('settings')">Settings</button>
   </nav>
   <span class="clock" id="clock"></span>
@@ -308,6 +309,8 @@ let strat = null;
 let scan = null, scanTf = localStorage.getItem('scanTf') || '1d', scanning = false;
 let buys = null, buying = false, adding = false;
 let buyFilter = localStorage.getItem('buyFilter') || 'all';
+let coiledOnly = localStorage.getItem('coiledOnly') === '1';
+let showRupees = localStorage.getItem('showRupees') === '1';
 
 function setBuyFilter(f){
   buyFilter = f;
@@ -315,15 +318,32 @@ function setBuyFilter(f){
   render(lastData);
 }
 
+function toggleCoiled(){
+  coiledOnly = !coiledOnly;
+  localStorage.setItem('coiledOnly', coiledOnly ? '1' : '0');
+  render(lastData);
+}
+
+function setUnits(rupees){
+  showRupees = rupees;
+  localStorage.setItem('showRupees', rupees ? '1' : '0');
+  render(lastData);
+}
+
 /* Rows are tagged with the highest level price has cleared, so "broke the
    lower level but not the upper" is exactly the rows tagged with the lower
-   one. No second scan needed - it is the same data, sliced. */
+   one. No second scan needed - it is the same data, sliced.
+
+   The level filter and the coiled filter combine, so "coiled AND still under
+   R4" is reachable - which is the pairing worth looking at. */
 function filteredBuys(){
   if(!buys || !buys.buys) return [];
   const lv = buys.levels || [];
-  if(buyFilter === 'lower') return buys.buys.filter(b => b.level_name === lv[0]);
-  if(buyFilter === 'upper') return buys.buys.filter(b => b.level_name === lv[lv.length - 1]);
-  return buys.buys;
+  let out = buys.buys;
+  if(buyFilter === 'lower') out = out.filter(b => b.level_name === lv[0]);
+  else if(buyFilter === 'upper') out = out.filter(b => b.level_name === lv[lv.length - 1]);
+  if(coiledOnly) out = out.filter(b => b.coiled);
+  return out;
 }
 let autoOn = localStorage.getItem('auto') === '1';
 let autoSecs = +(localStorage.getItem('autoSecs') || 60);
@@ -414,7 +434,9 @@ function go(v){
   document.querySelectorAll('#views button').forEach(b =>
     b.setAttribute('aria-current', b.dataset.view === v));
   if(v === 'history' && active) return loadHistory();
-  if(v === 'settings') return loadSettings();
+  // About reports which pivot system is live, so it needs settings too.
+  // loadSettings() re-renders, and `view` is already set, so About draws.
+  if(v === 'settings' || v === 'about') return loadSettings();
   if(v === 'strategy') return loadStrategy();
   if(v === 'scanner') return loadScan();
   if(v === 'buylist') return loadBuys();
@@ -570,6 +592,30 @@ function growthSpan(s){
     : '';
   return `<span title="From ₹${s.ref_close}${when ? ', the close before it was added ' + when : ''}">
     <b>Since added</b> <i class="${cls}">${s.since_pct >= 0 ? '+' : ''}${s.since_pct}%</i></span>`;
+}
+
+/* How far a stock still has to run to the top breakout level of whichever
+   pivot system is selected. Same measure the Buy list sorts on. */
+function roomPct(s){
+  const keys = s.pivot_breakout || [];
+  const top = keys[keys.length - 1];
+  const level = top && s.pivots ? s.pivots[top] : null;
+  if(level == null || !s.price) return null;
+  return (level - s.price) / s.price * 100;
+}
+
+/* Ordered the way the Buy list is ordered: most room to the top level first,
+   so the name with the furthest still to run is at the top of both screens.
+   Stocks already through the level have negative room and fall below; ones
+   that failed to load have none and go last. */
+function sortedSignals(list){
+  return (list || []).slice().sort((a, b) => {
+    const ra = roomPct(a), rb = roomPct(b);
+    if(ra == null && rb == null) return (a.symbol || '').localeCompare(b.symbol || '');
+    if(ra == null) return 1;
+    if(rb == null) return -1;
+    return rb - ra;
+  });
 }
 
 function card(s){
@@ -894,6 +940,81 @@ function candleChart(d){
     Yahoo data is delayed.</p>`;
 }
 
+/* ---------------- about ----------------
+   Deliberately principles and limits only. Procedure - Telegram setup,
+   hosting, caps - stays in the README as the single fuller reference, so the
+   two do not drift into contradicting each other. */
+function renderAbout(){
+  const sys = (settings && settings.pivots) || {};
+  const chosen = (sys.systems || []).find(x => x.key === sys.selected);
+  return `<section class="panel">
+    <h2>What this is</h2>
+    <p class="lede">A personal intraday signal desk for NSE and BSE stocks.
+      Everything works from <b>pivot levels calculated on the previous completed
+      session's high, low and close</b> — the same levels Kite and Chartink
+      compute. Three separate things are built on top of them.</p>
+
+    <h3>The three lists</h3>
+    <p class="lede"><b>Scanner</b> screens 182 NSE F&amp;O stocks for
+      <b>contraction</b>: the pivot band has closed in on <em>both</em> sides
+      versus the previous bar, so it now sits entirely inside it. That is a coil.
+      Each hit is ranked by how tightly it wound up, and every point of that rank
+      is listed with its reason. <b>The rank says nothing about which way it will
+      break</b> — it is not a buy signal.</p>
+    <p class="lede"><b>Buy list</b> is the other side: every F&amp;O name trading
+      above R3, split by whether it has also cleared R4, and sorted by how much
+      room is left to the next level. <em>Room to R4</em> read against
+      <em>Above by</em> tells you where in the move you are — a name just over R3
+      with plenty of room has the move ahead of it; one far above with little
+      room has already made it.</p>
+    <p class="lede"><b>Signals</b> scores your own watchlists and is the only part
+      that messages you. It sends a Telegram message when a verdict
+      <em>changes</em> — not every time it refreshes — so a stock sitting on BUY
+      does not buzz your phone all day.</p>
+
+    <h3>How the score works</h3>
+    <table style="margin-top:10px">
+      <thead><tr><th>Test</th><th>+1</th><th>−1</th></tr></thead>
+      <tbody>
+        <tr><td>Trend</td><td>price above both moving averages</td>
+            <td>price below both</td></tr>
+        <tr><td>Volume</td><td>above session VWAP</td><td>below session VWAP</td></tr>
+        <tr><td>Pivot</td><td>broken above the band</td><td>broken below it</td></tr>
+      </tbody>
+    </table>
+    <p class="lede">Half a point for weaker versions of each. <b>BUY</b> at +2 or
+      above, <b>SELL</b> at −2 or below, otherwise <b>HOLD</b>. Every card lists
+      which tests it passed, so nothing is a black box.</p>
+
+    <h3>Pivot systems</h3>
+    <p class="lede">Six are selectable in Settings — Camarilla, Classic,
+      Fibonacci, Woodie, DeMark and CPR — and the score, Scanner, Buy list and
+      charts all follow the choice. Currently on
+      <b>${esc(chosen ? chosen.label : 'Camarilla')}</b>.
+      ${sys.selected && sys.selected !== 'camarilla'
+        ? '<span style="color:var(--brass)">On anything other than Camarilla the '
+          + 'Scanner stops matching the Chartink scan it was built from.</span>'
+        : ''}</p>
+
+    <h3 style="color:var(--brass)">What it does not do</h3>
+    <p class="lede"><b>It never places an order.</b> There is no broker
+      connection. You get a message and place the trade yourself.</p>
+    <p class="lede"><b>Prices are delayed and unofficial.</b> They come from
+      Yahoo Finance, which lags the exchange and occasionally returns nothing at
+      all. Verify any level on your broker terminal before acting on it.</p>
+    <p class="lede"><b>None of this predicts anything.</b> Every number here is
+      arithmetic on past prices. A 3/3 score is not a claim about the future.</p>
+    <p class="lede"><b>Signing in is a gate, not security.</b> Four accounts
+      share one weak password and all see the same watchlists, settings and
+      history. It keeps a passer-by out of a public URL and nothing more.</p>
+
+    <p class="hint" style="margin-top:18px">Full documentation, including the
+      Telegram setup and hosting, is in the README:
+      <a href="https://github.com/neurolooom-eng/stockanalysis" target="_blank"
+        rel="noopener" style="color:var(--brass)">github.com/neurolooom-eng/stockanalysis</a></p>
+  </section>`;
+}
+
 /* ---------------- buy list (above R3 / R4) ---------------- */
 async function loadBuys(){
   try{ buys = await api('/api/buylist'); }
@@ -946,23 +1067,43 @@ async function buysToWatchlist(){
    and this is the distance to it. Once it is through, there is no level left
    above to measure against. */
 /* A signed percentage, coloured, with an optional "since when" tooltip. */
-function pctCell(pct, since){
-  if(pct == null) return '<span class="open">—</span>';
-  const cls = pct >= 0 ? 'up' : 'down';
-  const when = since
-    ? ` title="Since ${new Date(since).toLocaleDateString('en-IN',
-        {day:'2-digit', month:'short'})}"`
-    : '';
-  return `<b class="${cls}"${when}>${pct >= 0 ? '+' : ''}${pct}%</b>`;
+/* Every figure below is a distance, and the toggle decides whether it is shown
+   as a percentage of price or as the rupees behind it. The percentage is what
+   your return depends on and is the only fair way to compare a Rs 50 stock
+   with a Rs 3,000 one; the rupee amount is what actually moves in the trade.
+   Both come from the same two numbers, so neither is derived more loosely. */
+function amountCell(pct, rupees, opts){
+  const o = opts || {};
+  if(pct == null && rupees == null) return '<span class="open">—</span>';
+  const v = showRupees ? rupees : pct;
+  if(v == null) return '<span class="open">—</span>';
+  if(o.zeroText && v <= 0) return `<span class="open">${esc(o.zeroText)}</span>`;
+  const cls = v >= 0 ? 'up' : 'down';
+  const sign = v >= 0 ? '+' : '−';
+  const body = showRupees
+    ? sign + '₹' + Math.abs(rupees).toLocaleString('en-IN',
+        {minimumFractionDigits:2, maximumFractionDigits:2})
+    : sign + Math.abs(pct).toFixed(2) + '%';
+  const tip = o.title ? ` title="${esc(o.title)}"` : '';
+  return `<b class="${cls}"${tip}>${body}</b>`;
+}
+
+function pctCell(pct, price, base, since){
+  const rupees = (price != null && base != null) ? price - base : null;
+  return amountCell(pct, rupees, {
+    title: since
+      ? 'Since ' + new Date(since).toLocaleDateString('en-IN',
+          {day:'2-digit', month:'short'})
+      : null});
 }
 
 function roomTo(b){
-  // The server computes and stores this, and sorts on it. Fall back to working
-  // it out here only for rows written before the column existed.
+  // The server computes and stores room_pct, and sorts on it. Fall back to
+  // working it out here only for rows written before the column existed.
   const pct = (b.room_pct != null) ? b.room_pct
     : (b.h4 && b.price ? (b.h4 - b.price) / b.price * 100 : null);
-  if(pct == null || pct <= 0) return '<span class="open">past it</span>';
-  return `<b class="up">+${pct.toFixed(2)}%</b>`;
+  const rupees = (b.h4 != null && b.price != null) ? b.h4 - b.price : null;
+  return amountCell(pct, rupees, {zeroText: 'past it'});
 }
 
 function renderBuys(){
@@ -1004,7 +1145,8 @@ function renderBuys(){
 
   // Only worth offering when the system actually has two breakout levels.
   // DeMark and CPR have one, so there is no "broke A but not B" to show.
-  const filters = lv.length > 1 ? `<div class="row" style="margin-top:12px">
+  const nCoiled = buys.buys.filter(b => b.coiled).length;
+  const levelChips = lv.length > 1 ? `
       <button class="chip" aria-pressed="${buyFilter === 'all'}"
         onclick="setBuyFilter('all')">All<span class="n">${buys.buys.length}</span></button>
       <button class="chip" aria-pressed="${buyFilter === 'lower'}"
@@ -1012,14 +1154,23 @@ function renderBuys(){
         <span class="n">${nLower}</span></button>
       <button class="chip" aria-pressed="${buyFilter === 'upper'}"
         onclick="setBuyFilter('upper')">Above ${esc(topLevel)}
-        <span class="n">${nUpper}</span></button>
-    </div>` : '';
+        <span class="n">${nUpper}</span></button>` : '';
+
+  const filters = `<div class="row" style="margin-top:12px">${levelChips}
+      ${levelChips ? '<span class="axsep"></span>' : ''}
+      <button class="chip" aria-pressed="${coiledOnly}" onclick="toggleCoiled()"
+        >Coiled only<span class="n">${nCoiled}</span></button>
+      <span class="axsep"></span>
+      <button class="chip" aria-pressed="${!showRupees}" onclick="setUnits(false)">%</button>
+      <button class="chip" aria-pressed="${showRupees}" onclick="setUnits(true)">₹</button>
+    </div>`;
 
   const shown = filteredBuys();
   if(!shown.length){
-    return head + filters + `<div class="empty"><p>Nothing in this group right
-      now. ${buys.buys.length} name${buys.buys.length === 1 ? '' : 's'} in the
-      others.</p></div></section>`;
+    return head + filters + `<div class="empty"><p>Nothing matches
+      ${coiledOnly ? '<b>coiled</b> plus that level filter' : 'that filter'}
+      right now. ${buys.buys.length} name${buys.buys.length === 1 ? '' : 's'}
+      on the list in total.</p></div></section>`;
   }
 
   const rows = shown.map(b => `<tr>
@@ -1029,10 +1180,10 @@ function renderBuys(){
       <td class="sig"><b class="BUY">${esc(b.level_name)}</b></td>
       <td>${money(b.price)}</td>
       <td>${money(b.level_price)}</td>
-      <td class="up">+${b.above_pct}%</td>
+      <td>${amountCell(b.above_pct, b.price - b.level_price)}</td>
       <td>${roomTo(b)}</td>
-      <td>${pctCell(b.today_pct)}</td>
-      <td>${pctCell(b.since_pct, b.first_at)}</td>
+      <td>${pctCell(b.today_pct, b.price, b.prev_close)}</td>
+      <td>${pctCell(b.since_pct, b.price, b.ref_close, b.first_at)}</td>
       <td>${money(b.h3)}</td>
       <td>${money(b.h4)}</td>
       <td>${b.turnover_cr == null ? '—' : b.turnover_cr + ' cr'}</td>
@@ -1067,6 +1218,10 @@ function renderBuys(){
       selected, so what you see is what goes on. They are added in the order shown,
       so if there are more than a watchlist holds, the freshest breaks go on first
       and the rest are reported rather than dropped quietly.</p>
+    <p class="hint">Showing <b>${shown.length}</b> of ${buys.buys.length}${
+      coiledOnly ? ', coiled only' : ''}. The <b>%</b> / <b>₹</b> chips switch
+      every figure in the table between a percentage of price and the rupees
+      behind it.</p>
     <p class="lede"><b>Sorted by how much room is left to ${esc(topLevel)}</b> —
       furthest still to run at the top. Names already through ${esc(topLevel)}
       have no room left to measure and sit at the bottom. <b>coiled</b> marks
@@ -1096,15 +1251,32 @@ async function runContraction(){
   if(scanning) return;
   scanning = true;
   render(lastData);
-  toast(`Scanning ${TF_LABEL[scanTf]} — a full F&O list takes a minute…`);
+  toast(`Scanning ${TF_LABEL[scanTf]} and refreshing the Buy list — a full F&O
+    list takes a couple of minutes…`);
   try{
     const r = await api('/api/scan/run?timeframe=' + scanTf, {method:'POST'});
     let msg = `${r.hits.length} contracting of ${r.scanned} scanned`;
     if(r.skipped_illiquid) msg += ` · ${r.skipped_illiquid} too thin`;
     if(r.failed.length)    msg += ` · ${r.failed.length} no data`;
-    toast(msg);
     scan = null;
     await loadScan();
+
+    // One Sync refreshes both lists. They read the same universe and the same
+    // levels, so leaving the Buy list stale after a scan meant the two screens
+    // could disagree about the same stock. It is a second pass over the
+    // universe, which is why this takes longer than it used to.
+    try{
+      const b = await api('/api/buylist/run', {method:'POST'});
+      msg += ` · Buy list ${b.buys.length} above ${
+        (b.levels && b.levels[0]) || 'R3'}`;
+      buys = null;
+      await loadBuys();
+    }catch(e){
+      // The contraction scan already succeeded - say what failed rather than
+      // losing the result that did land.
+      msg += ' · Buy list refresh failed: ' + e.message;
+    }
+    toast(msg);
   }catch(e){ toast(e.message); }
   finally{ scanning = false; render(lastData); }
 }
@@ -1578,6 +1750,7 @@ function render(data){
   const el = $('#body');
   if(active && view === 'history'){ el.innerHTML = renderHistory(); return; }
   if(view === 'settings'){ el.innerHTML = renderSettings(); return; }
+  if(view === 'about'){ el.innerHTML = renderAbout(); return; }
   if(view === 'buylist'){ el.innerHTML = renderBuys(); return; }
   if(view === 'scanner'){ el.innerHTML = renderScanner(); return; }
   if(view === 'strategy'){ el.innerHTML = renderStrategy(); return; }
@@ -1631,7 +1804,7 @@ function render(data){
       autoOn ? ` · refreshing every ${autoSecs < 60 ? autoSecs + 's' : autoSecs/60 + 'm'}` : ''}</p>` : ''}
 
     ${busy ? '<p class="eyebrow skel">Pulling quotes and recomputing levels…</p>' : ''}
-    ${data ? `<div class="grid">${data.signals.map(card).join('')}</div>` :
+    ${data ? `<div class="grid">${sortedSignals(data.signals).map(card).join('')}</div>` :
       (!busy ? `<div class="empty"><p>${stocks.length ?
         'Watchlist ready. Run signals to score every stock on it.' :
         'Add a few stocks above, then run signals.'}</p></div>` : '')}

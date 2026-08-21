@@ -66,6 +66,10 @@ Mac/Linux form, which is why PowerShell rejected it.
 Six views along the top: **Signals**, **Buy list**, **Scanner**, **Strategy**,
 **History** and **Settings**.
 
+Cards are ordered the way the Buy list is ordered — **most room to R4 first**,
+so the name with the furthest still to run is at the top of both screens. Stocks
+already through the level sit below, and any that failed to load go last.
+
 Cards show a **Since added** figure alongside the moving averages: growth
 measured from the previous session's close on the day you added the stock,
 frozen at that point. The percentage beside the price is only today's move; this
@@ -364,6 +368,22 @@ A stock whose price failed to load keeps its reference. No data is not the same
 thing as "no longer a buy", and a transient Yahoo hiccup shouldn't lose the
 history.
 
+### Filters, and percent vs rupees
+
+Chips above the table:
+
+- **Level** — All, broke R3 but not R4, or above R4.
+- **Coiled only** — restrict to names that are *also* contracting. This
+  **combines** with the level filter, so "coiled and still under R4" — arguably
+  the most interesting pairing on the screen — is one click away.
+- **% / ₹** — switches every figure in the table between a percentage of price
+  and the rupees behind it.
+
+Both are worth having. The percentage is what your return depends on and the
+only fair way to compare a ₹50 stock against a ₹3,000 one; the rupee amount is
+what actually moves in the trade. They come from the same two numbers, so
+neither is looser than the other. The choice is remembered between sessions.
+
 ### Turning the Buy list into a watchlist
 
 **Add to watchlist** puts the whole list onto a watchlist in one click, so the
@@ -416,8 +436,15 @@ hard. Both numbers are shown; the Scanner selects on contraction.
 | Tab | What it means |
 |---|---|
 | **Daily** | The list for the **next session**. Levels come from the last completed daily bar, which is exactly what tomorrow trades against. Run it after 15:30 IST. |
+
 | **15 min** | Coils forming inside today's session. |
 | **5 min** | The same, finer — more hits, more noise. |
+
+**Sync now refreshes both lists.** One press runs the contraction scan *and*
+re-runs the Buy list, because the two read the same universe and the same
+levels — leaving one stale meant the two screens could disagree about the same
+stock. It is a second pass over the universe, so it takes roughly twice as long
+as it used to.
 
 A bar that is still forming is never used. While the market is open the latest
 bar's high, low and close are still moving, and a contraction test against half a

@@ -237,6 +237,7 @@ def init_db():
                 room_pct    REAL,
                 prev_close  REAL,
                 first_at    TEXT,
+                ref_close   REAL,
                 since_pct   REAL,
                 h3          REAL NOT NULL,
                 h4          REAL NOT NULL,
@@ -274,7 +275,7 @@ def init_db():
             conn.execute("ALTER TABLE profiles ADD COLUMN alerts INTEGER NOT NULL DEFAULT 1")
         bcols = {r["name"] for r in conn.execute("PRAGMA table_info(breakouts)")}
         if bcols:
-            for col in ("room_pct", "prev_close", "since_pct"):
+            for col in ("room_pct", "prev_close", "since_pct", "ref_close"):
                 if col not in bcols:
                     conn.execute(f"ALTER TABLE breakouts ADD COLUMN {col} REAL")
             if "first_at" not in bcols:
@@ -902,6 +903,10 @@ def analyse(symbol: str, exchange: str) -> Dict:
             # system produced it.
             "pivot_order": [k for k in PIVOT_SYSTEMS[system]["order"] if k in piv],
             "pivot_band": list(PIVOT_SYSTEMS[system]["band"]),
+            # Which levels count as a breakout on this system, low to high. The
+            # watchlist sorts on the distance to the highest of them, the same
+            # ordering the Buy list uses.
+            "pivot_breakout": list(PIVOT_SYSTEMS[system]["breakout"]),
             "as_of": as_of,
             "basis": basis,
         })
@@ -1625,11 +1630,13 @@ def scan_breakouts(exchange: str = "NSE") -> Dict:
             conn.execute(
                 "INSERT OR REPLACE INTO breakouts (symbol, exchange, scanned_at,"
                 " price, level_name, level_price, above_pct, room_pct,"
-                " prev_close, first_at, since_pct, h3, h4, pp, coiled,"
-                " turnover_cr) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " prev_close, first_at, ref_close, since_pct, h3, h4, pp,"
+                " coiled, turnover_cr)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (h["symbol"], h["exchange"], scanned_at, h["price"],
                  h["level_name"], h["level_price"], h["above_pct"],
-                 h["room_pct"], h["prev_close"], h["first_at"], h["since_pct"],
+                 h["room_pct"], h["prev_close"], h["first_at"],
+                 h["ref_close"], h["since_pct"],
                  h["h3"], h["h4"], h["pp"], int(h["coiled"]),
                  h["turnover_cr"]))
 

@@ -141,6 +141,23 @@ the README for the recovery command if a pull ever removes it.
   themselves. This is deliberately *not* the same as sorting by `above_pct`:
   the R3→R4 gap scales with the previous day's range, so the two orderings
   genuinely disagree across stocks. Don't "simplify" one into the other.
+- **Percent and rupees are two views of the same two numbers**, toggled in the
+  Buy list and remembered per browser. Percent is what return depends on and
+  the only fair comparison across price levels; rupees is what moves in the
+  trade. `amountCell()` takes both and picks — don't compute one from the other
+  at render time, and don't let the toggle apply to only some columns.
+- **The coiled filter combines with the level filter**, so "coiled and still
+  under R4" is reachable. Keep them independent rather than merging into one
+  chip row of mutually exclusive options.
+- **Scanner's Sync refreshes the Buy list too.** They read the same universe
+  and the same levels, so a stale Buy list after a scan meant the two screens
+  could disagree about a stock. It costs a second pass over the universe; if
+  that ever becomes too slow the fix is a combined endpoint sharing one daily
+  fetch, not dropping the refresh.
+- **The watchlist cards sort by room to the top breakout level**, the same
+  ordering the Buy list uses, so one mental model covers both screens.
+  `analyse()` returns `pivot_breakout` for this; without it the client would
+  have to hardcode which level is the breakout per system.
 - **The Buy list groups are a slice of the same data, not a second scan.** Rows
   are tagged with the highest breakout level price has cleared, so "broke R3
   but not R4" is just the rows tagged R3 — filtered client-side, no extra Yahoo
