@@ -1,16 +1,37 @@
 # Pivot Desk
 
-Intraday signal dashboard for NSE and BSE stocks, scored on Camarilla pivots,
-moving averages and session VWAP. Profiles hold up to 30 stocks each.
+A personal intraday signal desk for NSE and BSE stocks. Everything works from
+**Camarilla pivots** taken from the previous session's high, low and close — the
+same levels Kite and Chartink compute — and does three separate things with them:
 
-**Four files, one folder, no npm.** The Python server also serves the web page,
+- **Scanner** — runs a Chartink contraction filter across **182 NSE F&O stocks**
+  on daily, 15-minute and 5-minute bars, finding names whose pivot band has
+  closed in on both sides, and ranks each hit by how tightly it has coiled.
+- **Buy list** — every F&O name trading above R3, grouped by whether it has also
+  cleared R4, sorted by how much room is left to run, with growth tracked from
+  the day it was first flagged.
+- **Signals** — scores your own watchlists from −3 to +3 on trend, session VWAP
+  and pivot position, and messages your phones over Telegram when a verdict
+  *changes* rather than on every refresh.
+
+Six pivot systems are selectable (Camarilla, Classic, Fibonacci, Woodie, DeMark,
+CPR) and the score, Scanner, Buy list and charts all follow the choice. Charts
+are hand-drawn SVG with the levels marked and session breaks ruled.
+
+**Five files, one folder, no npm.** The Python server also serves the web page,
 so there is one thing to run and one thing to deploy.
+
+Prices come from Yahoo and are **delayed and unofficial**. The score is
+arithmetic on past prices, not a prediction. The login is a gate over shared
+data, not real account security. And **it alerts — it never places an order**:
+you get a message and place the trade yourself.
 
 ---
 
 ## Run it on Windows
 
-1. Put all four files in one folder: `app.py`, `index.html`, `requirements.txt`, `run.bat`
+1. Put the files in one folder: `app.py`, `index.html`, `requirements.txt`,
+   `run.bat` (`render.yaml` is only needed for hosting)
 2. Double-click **`run.bat`**
 
 That's it. It creates the Python environment, installs what it needs, starts the
@@ -44,6 +65,10 @@ Mac/Linux form, which is why PowerShell rejected it.
 
 Six views along the top: **Signals**, **Buy list**, **Scanner**, **Strategy**,
 **History** and **Settings**.
+
+Cards are ordered the way the Buy list is ordered — **most room to R4 first**,
+so the name with the furthest still to run is at the top of both screens. Stocks
+already through the level sit below, and any that failed to load go last.
 
 Cards show a **Since added** figure alongside the moving averages: growth
 measured from the previous session's close on the day you added the stock,
@@ -160,6 +185,60 @@ saved.
 
 ---
 
+## AI analysis
+
+**Ask AI** on any row of the Buy list or Scanner, or any Signals card, sends
+that stock's numbers to a language model and gets back a short read-out ending
+in **BUY**, **WATCH** or **AVOID**.
+
+**Analyse all with AI** on the watchlist does the whole list. It is offered
+*only* there, deliberately: the Buy list and Scanner can run to a hundred names,
+and that would be a hundred paid calls from one click. A confirmation tells you
+how many calls it is about to make.
+
+### Your key, your bill
+
+**Settings → AI analysis.** Each account stores its own provider, model and key,
+so `pnk`, `kau`, `kaushik` and `jana` each pay for their own usage and nobody
+can spend someone else's credit. The key is kept in the database on this machine
+and is never sent back to the page in full — only the last four characters, the
+same as the Telegram token.
+
+Both **Anthropic** and **OpenAI** work. The model dropdown is filled by asking
+the provider what it currently serves, rather than from a list frozen into this
+app — both ship models faster than this code gets updated.
+
+You will need to `pip install -r requirements.txt` once to pull in the SDKs.
+They are imported only when you actually run an analysis, so the app runs
+perfectly well without them if you never use this.
+
+### What it is, and what it is not
+
+The model is given exactly what you can see: the levels, where price sits
+against them, the band, the contraction, volume, the moving averages, VWAP and
+the desk's own score with its reasons. It has **no news, no fundamentals, no
+order book and no live quote**, and the prices it reads are delayed. It is
+instructed to say so rather than invent a reason.
+
+**It is not part of the score.** The score is arithmetic you can check line by
+line; this is a model's reading of the same numbers, and the two will sometimes
+disagree. The panel keeps them visually separate and says which is which. It is
+not advice, and it places no orders.
+
+---
+
+## Sorting
+
+Every column header with an arrow sorts. Click to sort, click again to reverse.
+Your choice is remembered per table, so it survives a refresh.
+
+The **defaults are the orderings each list was designed around** — the Buy list
+by room to the next level, the Scanner by coil rank — so an untouched table
+looks exactly as it always did. Missing values always sink to the bottom
+whichever way the sort points, rather than clustering at the top.
+
+---
+
 ## Choosing a pivot system
 
 **Settings → Pivot system** picks the maths everything runs on. The Signals
@@ -233,7 +312,8 @@ too close to label legibly the line is still drawn but the label is dropped, ban
 and PP first.
 
 This is drawn as plain SVG with no charting library, deliberately — the app is
-four files with no build step, and a CDN or npm dependency would end that. So it
+a handful of files with no build step, and a CDN or npm dependency would end
+that. So it
 is a chart for seeing where price sits against your levels, not a trading
 terminal. No drawing tools, no pan and zoom, and **Yahoo's data is delayed**, so
 it will not tick along with Kite.
@@ -342,6 +422,22 @@ A stock whose price failed to load keeps its reference. No data is not the same
 thing as "no longer a buy", and a transient Yahoo hiccup shouldn't lose the
 history.
 
+### Filters, and percent vs rupees
+
+Chips above the table:
+
+- **Level** — All, broke R3 but not R4, or above R4.
+- **Coiled only** — restrict to names that are *also* contracting. This
+  **combines** with the level filter, so "coiled and still under R4" — arguably
+  the most interesting pairing on the screen — is one click away.
+- **% / ₹** — switches every figure in the table between a percentage of price
+  and the rupees behind it.
+
+Both are worth having. The percentage is what your return depends on and the
+only fair way to compare a ₹50 stock against a ₹3,000 one; the rupee amount is
+what actually moves in the trade. They come from the same two numbers, so
+neither is looser than the other. The choice is remembered between sessions.
+
 ### Turning the Buy list into a watchlist
 
 **Add to watchlist** puts the whole list onto a watchlist in one click, so the
@@ -394,8 +490,15 @@ hard. Both numbers are shown; the Scanner selects on contraction.
 | Tab | What it means |
 |---|---|
 | **Daily** | The list for the **next session**. Levels come from the last completed daily bar, which is exactly what tomorrow trades against. Run it after 15:30 IST. |
+
 | **15 min** | Coils forming inside today's session. |
 | **5 min** | The same, finer — more hits, more noise. |
+
+**Sync now refreshes both lists.** One press runs the contraction scan *and*
+re-runs the Buy list, because the two read the same universe and the same
+levels — leaving one stale meant the two screens could disagree about the same
+stock. It is a second pass over the universe, so it takes roughly twice as long
+as it used to.
 
 A bar that is still forming is never used. While the market is open the latest
 bar's high, low and close are still moving, and a contraction test against half a

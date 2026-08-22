@@ -227,6 +227,9 @@ td.sig .BUY{color:var(--up)} td.sig .SELL{color:var(--down)} td.sig .HOLD{color:
 /* Build stamp sits under the disclaimer with no second rule above it. */
 .note.build{border-top:0;margin-top:8px;padding-top:0;opacity:.75}
 .note.build b{color:var(--brass);font-weight:400}
+.refreshBtn{color:var(--brass);cursor:pointer;text-decoration:underline;
+  font-size:11px;padding:0;background:none;border:none}
+.refreshBtn:hover{opacity:.7}
 .chartwrap{position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:30;
   display:flex;align-items:center;justify-content:center;padding:18px}
 .chartwrap[hidden]{display:none}
@@ -236,6 +239,20 @@ td.sig .BUY{color:var(--up)} td.sig .SELL{color:var(--down)} td.sig .HOLD{color:
 /* Divider between the interval chips and the bar-count chips. */
 .axsep{display:inline-block;width:1px;height:20px;background:var(--rule);
   margin:0 4px;vertical-align:middle}
+th.sortable{cursor:pointer;user-select:none;white-space:nowrap}
+th.sortable:hover{color:var(--paper)}
+th.sortable.on{color:var(--brass)}
+.btn.tiny{padding:3px 8px;font-size:11px}
+.ailabel{color:var(--dim);letter-spacing:.08em;font-size:11px;margin-right:6px}
+.aicall{color:var(--brass);letter-spacing:.08em;font-size:11px;margin-right:6px}
+/* The existing tag colours are scoped as ".buy .tag" - a descendant rule that
+   needs a wrapping card. The AI verdict badge stands on its own, so it needs
+   these standalone equivalents. */
+h3 .tag{font-family:var(--cond);font-size:12px;font-weight:700;padding:2px 9px;
+  letter-spacing:.06em;vertical-align:middle;margin-left:6px}
+.tag.buy{background:var(--up);color:#06170E}
+.tag.sell{background:var(--down);color:#1D0806}
+.tag.hold{background:var(--panel-2);color:var(--muted);border:1px solid var(--rule)}
 .candles{width:100%;min-width:520px;height:auto;display:block}
 .sym.click{cursor:pointer;text-decoration:underline;text-decoration-style:dotted;
   text-underline-offset:3px}
@@ -260,6 +277,7 @@ tbody tr td b.click{cursor:pointer;text-decoration:underline;
     <button data-view="scanner" onclick="go('scanner')">Scanner</button>
     <button data-view="strategy" onclick="go('strategy')">Strategy</button>
     <button data-view="history" onclick="go('history')">History</button>
+    <button data-view="about" onclick="go('about')">About</button>
     <button data-view="settings" onclick="go('settings')">Settings</button>
   </nav>
   <span class="clock" id="clock"></span>
@@ -308,6 +326,8 @@ let strat = null;
 let scan = null, scanTf = localStorage.getItem('scanTf') || '1d', scanning = false;
 let buys = null, buying = false, adding = false;
 let buyFilter = localStorage.getItem('buyFilter') || 'all';
+let coiledOnly = localStorage.getItem('coiledOnly') === '1';
+let showRupees = localStorage.getItem('showRupees') === '1';
 
 function setBuyFilter(f){
   buyFilter = f;
@@ -315,15 +335,32 @@ function setBuyFilter(f){
   render(lastData);
 }
 
+function toggleCoiled(){
+  coiledOnly = !coiledOnly;
+  localStorage.setItem('coiledOnly', coiledOnly ? '1' : '0');
+  render(lastData);
+}
+
+function setUnits(rupees){
+  showRupees = rupees;
+  localStorage.setItem('showRupees', rupees ? '1' : '0');
+  render(lastData);
+}
+
 /* Rows are tagged with the highest level price has cleared, so "broke the
    lower level but not the upper" is exactly the rows tagged with the lower
-   one. No second scan needed - it is the same data, sliced. */
+   one. No second scan needed - it is the same data, sliced.
+
+   The level filter and the coiled filter combine, so "coiled AND still under
+   R4" is reachable - which is the pairing worth looking at. */
 function filteredBuys(){
   if(!buys || !buys.buys) return [];
   const lv = buys.levels || [];
-  if(buyFilter === 'lower') return buys.buys.filter(b => b.level_name === lv[0]);
-  if(buyFilter === 'upper') return buys.buys.filter(b => b.level_name === lv[lv.length - 1]);
-  return buys.buys;
+  let out = buys.buys;
+  if(buyFilter === 'lower') out = out.filter(b => b.level_name === lv[0]);
+  else if(buyFilter === 'upper') out = out.filter(b => b.level_name === lv[lv.length - 1]);
+  if(coiledOnly) out = out.filter(b => b.coiled);
+  return out;
 }
 let autoOn = localStorage.getItem('auto') === '1';
 let autoSecs = +(localStorage.getItem('autoSecs') || 60);
@@ -380,6 +417,7 @@ async function start(){
   try{
     me = (await api('/api/me')).user;
     $('#gate').hidden = true;
+    await loadAi();          // per-account, so it must follow sign-in
     await loadProfiles();
   }catch(e){ showGate(); }
 }
@@ -397,8 +435,12 @@ async function loadBuild(){
     $('#build').innerHTML =
       `Build <b>${esc(r.build)}</b>`
       + (changed ? ` · code ${esc(fmt(changed))}` : '')
-      + (started ? ` · running since ${esc(fmt(started))}` : '');
+      + (started ? ` · running since ${esc(fmt(started))}` : '')
+      + ' · <button class="refreshBtn" onclick="hardRefresh()" title="Hard refresh to bypass cache">Refresh</button>';
   }catch(e){ $('#build').textContent = 'Build unknown — server unreachable.'; }
+}
+function hardRefresh(){
+  location.reload(true);
 }
 loadBuild();
 
@@ -414,7 +456,9 @@ function go(v){
   document.querySelectorAll('#views button').forEach(b =>
     b.setAttribute('aria-current', b.dataset.view === v));
   if(v === 'history' && active) return loadHistory();
-  if(v === 'settings') return loadSettings();
+  // About reports which pivot system is live, so it needs settings too.
+  // loadSettings() re-renders, and `view` is already set, so About draws.
+  if(v === 'settings' || v === 'about') return loadSettings();
   if(v === 'strategy') return loadStrategy();
   if(v === 'scanner') return loadScan();
   if(v === 'buylist') return loadBuys();
@@ -572,6 +616,30 @@ function growthSpan(s){
     <b>Since added</b> <i class="${cls}">${s.since_pct >= 0 ? '+' : ''}${s.since_pct}%</i></span>`;
 }
 
+/* How far a stock still has to run to the top breakout level of whichever
+   pivot system is selected. Same measure the Buy list sorts on. */
+function roomPct(s){
+  const keys = s.pivot_breakout || [];
+  const top = keys[keys.length - 1];
+  const level = top && s.pivots ? s.pivots[top] : null;
+  if(level == null || !s.price) return null;
+  return (level - s.price) / s.price * 100;
+}
+
+/* Ordered the way the Buy list is ordered: most room to the top level first,
+   so the name with the furthest still to run is at the top of both screens.
+   Stocks already through the level have negative room and fall below; ones
+   that failed to load have none and go last. */
+function sortedSignals(list){
+  return (list || []).slice().sort((a, b) => {
+    const ra = roomPct(a), rb = roomPct(b);
+    if(ra == null && rb == null) return (a.symbol || '').localeCompare(b.symbol || '');
+    if(ra == null) return 1;
+    if(rb == null) return -1;
+    return rb - ra;
+  });
+}
+
 function card(s){
   if(s.error) return `<article class="card err"><div class="head">
       <div class="sym click" onclick="openChart('${esc(s.symbol)}','${esc(s.exchange)}')"
@@ -608,6 +676,11 @@ function card(s){
       ${growthSpan(s)}
     </div>
     <div class="why">${why}</div>
+    <div class="row" style="margin:8px 0 0">
+      <button class="btn ghost tiny"
+        onclick="aiAnalyse('${esc(s.symbol)}','${esc(s.exchange)}','watchlist')"
+        >Ask AI</button>
+    </div>
     <p class="foot">${s.basis} · ${new Date(s.as_of).toLocaleString('en-IN',
       {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit'})}</p>
   </article>`;
@@ -894,6 +967,272 @@ function candleChart(d){
     Yahoo data is delayed.</p>`;
 }
 
+/* ---------------- about ----------------
+   Deliberately principles and limits only. Procedure - Telegram setup,
+   hosting, caps - stays in the README as the single fuller reference, so the
+   two do not drift into contradicting each other. */
+function renderAbout(){
+  const sys = (settings && settings.pivots) || {};
+  const chosen = (sys.systems || []).find(x => x.key === sys.selected);
+  return `<section class="panel">
+    <h2>What this is</h2>
+    <p class="lede">A personal intraday signal desk for NSE and BSE stocks.
+      Everything works from <b>pivot levels calculated on the previous completed
+      session's high, low and close</b> — the same levels Kite and Chartink
+      compute. Three separate things are built on top of them.</p>
+
+    <h3>The three lists</h3>
+    <p class="lede"><b>Scanner</b> screens 182 NSE F&amp;O stocks for
+      <b>contraction</b>: the pivot band has closed in on <em>both</em> sides
+      versus the previous bar, so it now sits entirely inside it. That is a coil.
+      Each hit is ranked by how tightly it wound up, and every point of that rank
+      is listed with its reason. <b>The rank says nothing about which way it will
+      break</b> — it is not a buy signal.</p>
+    <p class="lede"><b>Buy list</b> is the other side: every F&amp;O name trading
+      above R3, split by whether it has also cleared R4, and sorted by how much
+      room is left to the next level. <em>Room to R4</em> read against
+      <em>Above by</em> tells you where in the move you are — a name just over R3
+      with plenty of room has the move ahead of it; one far above with little
+      room has already made it.</p>
+    <p class="lede"><b>Signals</b> scores your own watchlists and is the only part
+      that messages you. It sends a Telegram message when a verdict
+      <em>changes</em> — not every time it refreshes — so a stock sitting on BUY
+      does not buzz your phone all day.</p>
+
+    <h3>How the score works</h3>
+    <table style="margin-top:10px">
+      <thead><tr><th>Test</th><th>+1</th><th>−1</th></tr></thead>
+      <tbody>
+        <tr><td>Trend</td><td>price above both moving averages</td>
+            <td>price below both</td></tr>
+        <tr><td>Volume</td><td>above session VWAP</td><td>below session VWAP</td></tr>
+        <tr><td>Pivot</td><td>broken above the band</td><td>broken below it</td></tr>
+      </tbody>
+    </table>
+    <p class="lede">Half a point for weaker versions of each. <b>BUY</b> at +2 or
+      above, <b>SELL</b> at −2 or below, otherwise <b>HOLD</b>. Every card lists
+      which tests it passed, so nothing is a black box.</p>
+
+    <h3>Pivot systems</h3>
+    <p class="lede">Six are selectable in Settings — Camarilla, Classic,
+      Fibonacci, Woodie, DeMark and CPR — and the score, Scanner, Buy list and
+      charts all follow the choice. Currently on
+      <b>${esc(chosen ? chosen.label : 'Camarilla')}</b>.
+      ${sys.selected && sys.selected !== 'camarilla'
+        ? '<span style="color:var(--brass)">On anything other than Camarilla the '
+          + 'Scanner stops matching the Chartink scan it was built from.</span>'
+        : ''}</p>
+
+    <h3 style="color:var(--brass)">What it does not do</h3>
+    <p class="lede"><b>It never places an order.</b> There is no broker
+      connection. You get a message and place the trade yourself.</p>
+    <p class="lede"><b>Prices are delayed and unofficial.</b> They come from
+      Yahoo Finance, which lags the exchange and occasionally returns nothing at
+      all. Verify any level on your broker terminal before acting on it.</p>
+    <p class="lede"><b>None of this predicts anything.</b> Every number here is
+      arithmetic on past prices. A 3/3 score is not a claim about the future.</p>
+    <p class="lede"><b>Signing in is a gate, not security.</b> Four accounts
+      share one weak password and all see the same watchlists, settings and
+      history. It keeps a passer-by out of a public URL and nothing more.</p>
+
+    <p class="hint" style="margin-top:18px">Full documentation, including the
+      Telegram setup and hosting, is in the README:
+      <a href="https://github.com/neurolooom-eng/stockanalysis" target="_blank"
+        rel="noopener" style="color:var(--brass)">github.com/neurolooom-eng/stockanalysis</a></p>
+  </section>`;
+}
+
+/* ---------------- AI commentary ----------------
+   Kept visually distinct from the score on purpose. The score is arithmetic
+   you can check line by line; this is a language model's read of the same
+   numbers, and the two will sometimes disagree. */
+let ai = null, aiBusy = false, aiModels = [];
+
+async function loadAi(){
+  try{ ai = await api('/api/ai'); }
+  catch(e){ ai = null; }
+}
+
+async function saveAi(patch){
+  try{
+    ai = await api('/api/ai', {method:'POST', body:JSON.stringify(patch)});
+    toast('Saved.');
+    if(patch.provider) aiModels = [];   // model lists differ per provider
+    render(lastData);
+  }catch(e){ toast(e.message); }
+}
+
+function saveAiKey(){
+  const v = $('#aiKey').value.trim();
+  if(!v) return toast('Paste a key first.');
+  $('#aiKey').value = '';
+  saveAi({key: v});
+}
+
+function clearAiKey(){
+  if(!confirm('Forget the saved API key for this account?')) return;
+  aiModels = [];
+  saveAi({key: ''});
+}
+
+async function loadAiModels(){
+  toast('Asking the provider what it serves…');
+  try{
+    const r = await api('/api/ai/models');
+    aiModels = r.models || [];
+    toast(`${aiModels.length} models available.`);
+    render(lastData);
+  }catch(e){ toast(e.message); }
+}
+
+function aiPanel(title, bodyHtml){
+  $('#chartWrap').hidden = false;
+  $('#chartTitle').textContent = title;
+  $('#chartTabs').innerHTML = '';
+  $('#chartBody').innerHTML = bodyHtml;
+}
+
+/* The model writes READ / WATCH / CALL lines. Render them as labelled blocks
+   so the verdict is findable without reading the whole thing. */
+function aiText(text){
+  return esc(text).split('\n').filter(l => l.trim()).map(line => {
+    const m = line.match(/^\s*(READ|WATCH|CALL)\s*:\s*(.*)$/i);
+    if(!m) return `<p class="lede">${line}</p>`;
+    const tag = m[1].toUpperCase();
+    const cls = tag === 'CALL' ? 'aicall' : 'ailabel';
+    return `<p class="lede"><b class="${cls}">${tag}</b> ${m[2]}</p>`;
+  }).join('');
+}
+
+function aiCard(r){
+  const v = (r.verdict || '').toUpperCase();
+  const badge = v ? `<span class="tag ${v === 'BUY' ? 'buy'
+    : v === 'AVOID' ? 'sell' : 'hold'}">${v}</span>` : '';
+  return `<section style="border-top:1px solid var(--rule);padding-top:12px;margin-top:12px">
+    <div class="row" style="justify-content:space-between;align-items:baseline">
+      <h3 style="margin:0">${esc(r.symbol)} ${badge}</h3>
+      <span class="hint">desk score ${esc(r.signal)} ${r.score}/3 · ${money(r.price)}</span>
+    </div>
+    ${aiText(r.text)}
+  </section>`;
+}
+
+const AI_FOOT = `<p class="hint" style="margin-top:16px">Written by a language
+  model from the numbers above — <b>not</b> part of the desk's score, which is
+  arithmetic you can check line by line. The two will sometimes disagree. It has
+  no news, no fundamentals and no live quote, and the prices it read are
+  delayed. Nothing here is advice, and nothing here places an order.</p>`;
+
+async function aiAnalyse(symbol, exchange, source){
+  if(aiBusy) return;
+  if(!ai || !ai.configured){
+    aiPanel('AI analysis', `<p class="lede">No API key saved for
+      <b>${esc(me || 'this account')}</b> yet. Add one in
+      <b>Settings → AI analysis</b> — each account uses its own key and pays for
+      its own usage.</p>`);
+    return;
+  }
+  aiBusy = true;
+  aiPanel(symbol, '<p class="hint">Asking ' + esc(ai.model || ai.provider) + '…</p>');
+  try{
+    const r = await api('/api/ai/analyse', {method:'POST',
+      body:JSON.stringify({symbol, exchange, source})});
+    aiPanel(symbol, aiCard(r)
+      + `<p class="hint">${esc(r.provider)} · ${esc(r.model)} · ${stamp(r.generated_at)}</p>`
+      + AI_FOOT);
+  }catch(e){
+    aiPanel(symbol, `<p class="lede">Could not analyse: ${esc(e.message)}</p>`);
+  }finally{ aiBusy = false; }
+}
+
+async function aiAnalyseAll(){
+  if(aiBusy || !active) return;
+  if(!ai || !ai.configured){
+    toast('Add your API key in Settings → AI analysis first.');
+    return;
+  }
+  const n = stocks.length;
+  if(!n) return toast('Nothing on this watchlist yet.');
+  if(!confirm(`Analyse all ${n} stocks with ${ai.model || ai.provider}?\n\n`
+    + `That is ${n} separate API calls billed to your own key, and takes a `
+    + `while — they run one at a time to avoid being rate-limited.`)) return;
+
+  aiBusy = true;
+  aiPanel('Analysing…', `<p class="hint">Working through ${n} stocks one at a
+    time. This stays open while it runs.</p>`);
+  try{
+    const r = await api('/api/ai/analyse-all/' + active, {method:'POST'});
+    const cards = r.analysed.map(aiCard).join('') || '<p class="lede">Nothing came back.</p>';
+    const bad = r.failed.length
+      ? `<p class="hint">Failed: ${r.failed.map(f =>
+          esc(f.symbol) + ' (' + esc(f.error) + ')').join(', ')}</p>`
+      : '';
+    aiPanel(`${r.analysed.length} of ${r.count} analysed`, cards + bad + AI_FOOT);
+  }catch(e){
+    aiPanel('AI analysis', `<p class="lede">Could not run: ${esc(e.message)}</p>`);
+  }finally{ aiBusy = false; }
+}
+
+/* ---------------- sorting ----------------
+   One mechanism for every table. Each table names its default column and
+   direction; clicking a header sorts by it, clicking again reverses. The
+   choice is remembered per table so a sort survives a refresh.
+
+   Defaults are the orderings the lists were designed around - the Buy list by
+   room to the next level, the Scanner by coil rank - so an untouched table
+   looks exactly as it did before sorting existed. */
+const SORT_DEFAULTS = {
+  buys:    {key: 'room_pct',   dir: -1},
+  scanner: {key: 'rank_score', dir: -1},
+};
+let sortState = {};
+try{ sortState = JSON.parse(localStorage.getItem('sortState') || '{}'); }
+catch(e){ sortState = {}; }
+
+function sortFor(table){
+  return sortState[table] || SORT_DEFAULTS[table] || {key: null, dir: 1};
+}
+
+function setSort(table, key){
+  const cur = sortFor(table);
+  // Same column again reverses; a new column starts descending for numbers,
+  // which is what you want nearly every time on this kind of data.
+  const dir = cur.key === key ? -cur.dir : -1;
+  sortState[table] = {key, dir};
+  localStorage.setItem('sortState', JSON.stringify(sortState));
+  render(lastData);
+}
+
+function resetSort(table){
+  delete sortState[table];
+  localStorage.setItem('sortState', JSON.stringify(sortState));
+  render(lastData);
+}
+
+function sortRows(rows, table){
+  const {key, dir} = sortFor(table);
+  if(!key) return rows;
+  return rows.slice().sort((a, b) => {
+    const x = a[key], y = b[key];
+    // Missing values always sink, whichever way the sort is pointing.
+    if(x == null && y == null) return 0;
+    if(x == null) return 1;
+    if(y == null) return -1;
+    if(typeof x === 'number' && typeof y === 'number') return (x - y) * dir;
+    return String(x).localeCompare(String(y)) * dir;
+  });
+}
+
+/* A <th> that sorts. Shows which column is active and which way. */
+function sortableTh(table, key, label){
+  const cur = sortFor(table);
+  const on = cur.key === key;
+  const arrow = on ? (cur.dir === -1 ? ' ▾' : ' ▴') : '';
+  return `<th class="sortable${on ? ' on' : ''}"
+    onclick="setSort('${table}','${key}')"
+    title="Sort by ${esc(label)}">${label}${arrow}</th>`;
+}
+
 /* ---------------- buy list (above R3 / R4) ---------------- */
 async function loadBuys(){
   try{ buys = await api('/api/buylist'); }
@@ -946,23 +1285,43 @@ async function buysToWatchlist(){
    and this is the distance to it. Once it is through, there is no level left
    above to measure against. */
 /* A signed percentage, coloured, with an optional "since when" tooltip. */
-function pctCell(pct, since){
-  if(pct == null) return '<span class="open">—</span>';
-  const cls = pct >= 0 ? 'up' : 'down';
-  const when = since
-    ? ` title="Since ${new Date(since).toLocaleDateString('en-IN',
-        {day:'2-digit', month:'short'})}"`
-    : '';
-  return `<b class="${cls}"${when}>${pct >= 0 ? '+' : ''}${pct}%</b>`;
+/* Every figure below is a distance, and the toggle decides whether it is shown
+   as a percentage of price or as the rupees behind it. The percentage is what
+   your return depends on and is the only fair way to compare a Rs 50 stock
+   with a Rs 3,000 one; the rupee amount is what actually moves in the trade.
+   Both come from the same two numbers, so neither is derived more loosely. */
+function amountCell(pct, rupees, opts){
+  const o = opts || {};
+  if(pct == null && rupees == null) return '<span class="open">—</span>';
+  const v = showRupees ? rupees : pct;
+  if(v == null) return '<span class="open">—</span>';
+  if(o.zeroText && v <= 0) return `<span class="open">${esc(o.zeroText)}</span>`;
+  const cls = v >= 0 ? 'up' : 'down';
+  const sign = v >= 0 ? '+' : '−';
+  const body = showRupees
+    ? sign + '₹' + Math.abs(rupees).toLocaleString('en-IN',
+        {minimumFractionDigits:2, maximumFractionDigits:2})
+    : sign + Math.abs(pct).toFixed(2) + '%';
+  const tip = o.title ? ` title="${esc(o.title)}"` : '';
+  return `<b class="${cls}"${tip}>${body}</b>`;
+}
+
+function pctCell(pct, price, base, since){
+  const rupees = (price != null && base != null) ? price - base : null;
+  return amountCell(pct, rupees, {
+    title: since
+      ? 'Since ' + new Date(since).toLocaleDateString('en-IN',
+          {day:'2-digit', month:'short'})
+      : null});
 }
 
 function roomTo(b){
-  // The server computes and stores this, and sorts on it. Fall back to working
-  // it out here only for rows written before the column existed.
+  // The server computes and stores room_pct, and sorts on it. Fall back to
+  // working it out here only for rows written before the column existed.
   const pct = (b.room_pct != null) ? b.room_pct
     : (b.h4 && b.price ? (b.h4 - b.price) / b.price * 100 : null);
-  if(pct == null || pct <= 0) return '<span class="open">past it</span>';
-  return `<b class="up">+${pct.toFixed(2)}%</b>`;
+  const rupees = (b.h4 != null && b.price != null) ? b.h4 - b.price : null;
+  return amountCell(pct, rupees, {zeroText: 'past it'});
 }
 
 function renderBuys(){
@@ -1004,7 +1363,8 @@ function renderBuys(){
 
   // Only worth offering when the system actually has two breakout levels.
   // DeMark and CPR have one, so there is no "broke A but not B" to show.
-  const filters = lv.length > 1 ? `<div class="row" style="margin-top:12px">
+  const nCoiled = buys.buys.filter(b => b.coiled).length;
+  const levelChips = lv.length > 1 ? `
       <button class="chip" aria-pressed="${buyFilter === 'all'}"
         onclick="setBuyFilter('all')">All<span class="n">${buys.buys.length}</span></button>
       <button class="chip" aria-pressed="${buyFilter === 'lower'}"
@@ -1012,30 +1372,42 @@ function renderBuys(){
         <span class="n">${nLower}</span></button>
       <button class="chip" aria-pressed="${buyFilter === 'upper'}"
         onclick="setBuyFilter('upper')">Above ${esc(topLevel)}
-        <span class="n">${nUpper}</span></button>
-    </div>` : '';
+        <span class="n">${nUpper}</span></button>` : '';
+
+  const filters = `<div class="row" style="margin-top:12px">${levelChips}
+      ${levelChips ? '<span class="axsep"></span>' : ''}
+      <button class="chip" aria-pressed="${coiledOnly}" onclick="toggleCoiled()"
+        >Coiled only<span class="n">${nCoiled}</span></button>
+      <span class="axsep"></span>
+      <button class="chip" aria-pressed="${!showRupees}" onclick="setUnits(false)">%</button>
+      <button class="chip" aria-pressed="${showRupees}" onclick="setUnits(true)">₹</button>
+    </div>`;
 
   const shown = filteredBuys();
   if(!shown.length){
-    return head + filters + `<div class="empty"><p>Nothing in this group right
-      now. ${buys.buys.length} name${buys.buys.length === 1 ? '' : 's'} in the
-      others.</p></div></section>`;
+    return head + filters + `<div class="empty"><p>Nothing matches
+      ${coiledOnly ? '<b>coiled</b> plus that level filter' : 'that filter'}
+      right now. ${buys.buys.length} name${buys.buys.length === 1 ? '' : 's'}
+      on the list in total.</p></div></section>`;
   }
 
-  const rows = shown.map(b => `<tr>
+  const rows = sortRows(shown, 'buys').map(b => `<tr>
       <td><b class="click" onclick="openChart('${esc(b.symbol)}','${esc(b.exchange)}')">${esc(b.symbol)}</b>${b.coiled
         ? ' <span class="chip" style="padding:2px 8px;font-size:11px">coiled</span>'
         : ''}</td>
       <td class="sig"><b class="BUY">${esc(b.level_name)}</b></td>
       <td>${money(b.price)}</td>
       <td>${money(b.level_price)}</td>
-      <td class="up">+${b.above_pct}%</td>
+      <td>${amountCell(b.above_pct, b.price - b.level_price)}</td>
       <td>${roomTo(b)}</td>
-      <td>${pctCell(b.today_pct)}</td>
-      <td>${pctCell(b.since_pct, b.first_at)}</td>
+      <td>${pctCell(b.today_pct, b.price, b.prev_close)}</td>
+      <td>${pctCell(b.since_pct, b.price, b.ref_close, b.first_at)}</td>
       <td>${money(b.h3)}</td>
       <td>${money(b.h4)}</td>
       <td>${b.turnover_cr == null ? '—' : b.turnover_cr + ' cr'}</td>
+      <td><button class="btn ghost tiny"
+        onclick="aiAnalyse('${esc(b.symbol)}','${esc(b.exchange)}','buylist')"
+        >Ask AI</button></td>
     </tr>`).join('');
 
   const r4 = nUpper;
@@ -1051,11 +1423,19 @@ function renderBuys(){
       <div class="stat"><b>${buys.universe_size}</b><span>symbols scanned</span></div>
     </div>
     <table style="margin-top:14px">
-      <thead><tr><th>Symbol</th><th>Level</th><th>Price</th><th>Level at</th>
-        <th>Above by</th><th>Room to ${esc(topLevel)}</th>
-        <th>Today</th><th>Since flagged</th>
+      <thead><tr>
+        ${sortableTh('buys', 'symbol', 'Symbol')}
+        ${sortableTh('buys', 'level_name', 'Level')}
+        ${sortableTh('buys', 'price', 'Price')}
+        ${sortableTh('buys', 'level_price', 'Level at')}
+        ${sortableTh('buys', 'above_pct', 'Above by')}
+        ${sortableTh('buys', 'room_pct', 'Room to ' + topLevel)}
+        ${sortableTh('buys', 'today_pct', 'Today')}
+        ${sortableTh('buys', 'since_pct', 'Since flagged')}
         <th>${esc(buys.buys[0]?.h3_name || lv[0])}</th>
-        <th>${esc(buys.buys[0]?.h4_name || topLevel)}</th><th>Turnover</th></tr></thead>
+        <th>${esc(buys.buys[0]?.h4_name || topLevel)}</th>
+        ${sortableTh('buys', 'turnover_cr', 'Turnover')}
+        <th></th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     ${lv.length > 1 ? `<p class="hint"><b>${esc(lv[0])} not ${esc(topLevel)}</b> is
@@ -1067,6 +1447,10 @@ function renderBuys(){
       selected, so what you see is what goes on. They are added in the order shown,
       so if there are more than a watchlist holds, the freshest breaks go on first
       and the rest are reported rather than dropped quietly.</p>
+    <p class="hint">Showing <b>${shown.length}</b> of ${buys.buys.length}${
+      coiledOnly ? ', coiled only' : ''}. The <b>%</b> / <b>₹</b> chips switch
+      every figure in the table between a percentage of price and the rupees
+      behind it.</p>
     <p class="lede"><b>Sorted by how much room is left to ${esc(topLevel)}</b> —
       furthest still to run at the top. Names already through ${esc(topLevel)}
       have no room left to measure and sit at the bottom. <b>coiled</b> marks
@@ -1096,15 +1480,32 @@ async function runContraction(){
   if(scanning) return;
   scanning = true;
   render(lastData);
-  toast(`Scanning ${TF_LABEL[scanTf]} — a full F&O list takes a minute…`);
+  toast(`Scanning ${TF_LABEL[scanTf]} and refreshing the Buy list — a full F&O
+    list takes a couple of minutes…`);
   try{
     const r = await api('/api/scan/run?timeframe=' + scanTf, {method:'POST'});
     let msg = `${r.hits.length} contracting of ${r.scanned} scanned`;
     if(r.skipped_illiquid) msg += ` · ${r.skipped_illiquid} too thin`;
     if(r.failed.length)    msg += ` · ${r.failed.length} no data`;
-    toast(msg);
     scan = null;
     await loadScan();
+
+    // One Sync refreshes both lists. They read the same universe and the same
+    // levels, so leaving the Buy list stale after a scan meant the two screens
+    // could disagree about the same stock. It is a second pass over the
+    // universe, which is why this takes longer than it used to.
+    try{
+      const b = await api('/api/buylist/run', {method:'POST'});
+      msg += ` · Buy list ${b.buys.length} above ${
+        (b.levels && b.levels[0]) || 'R3'}`;
+      buys = null;
+      await loadBuys();
+    }catch(e){
+      // The contraction scan already succeeded - say what failed rather than
+      // losing the result that did land.
+      msg += ' · Buy list refresh failed: ' + e.message;
+    }
+    toast(msg);
   }catch(e){ toast(e.message); }
   finally{ scanning = false; render(lastData); }
 }
@@ -1139,7 +1540,7 @@ function renderScanner(){
       Press <b>Sync now</b> to scan ${scan.universe_size} symbols.</p></div></section>`;
   }
 
-  const rows = scan.hits.map(h => {
+  const rows = sortRows(scan.hits, 'scanner').map(h => {
     const chips = (h.rules || []).map(r =>
       `<span class="chip" style="padding:2px 8px;font-size:11px"
         title="+${r.weight}">${esc(r.text)}</span>`).join(' ');
@@ -1153,6 +1554,9 @@ function renderScanner(){
       <td>${h.depth_pct}%</td>
       <td>${h.streak}</td>
       <td>${chips || '<span class="open">—</span>'}</td>
+      <td><button class="btn ghost tiny"
+        onclick="aiAnalyse('${esc(h.symbol)}','${esc(h.exchange)}','scanner')"
+        >Ask AI</button></td>
     </tr>`;
   }).join('');
 
@@ -1166,8 +1570,15 @@ function renderScanner(){
         <span>last sync</span></div>
     </div>
     <table style="margin-top:14px">
-      <thead><tr><th>Symbol</th><th>Rank</th><th>Price</th><th>H3 / L3</th>
-        <th>Band</th><th>Tighter by</th><th>Streak</th><th>Why it ranks</th></tr></thead>
+      <thead><tr>
+        ${sortableTh('scanner', 'symbol', 'Symbol')}
+        ${sortableTh('scanner', 'rank_score', 'Rank')}
+        ${sortableTh('scanner', 'price', 'Price')}
+        <th>${esc(scan.band_label || 'R3 / S3')}</th>
+        ${sortableTh('scanner', 'band_pct', 'Band')}
+        ${sortableTh('scanner', 'depth_pct', 'Tighter by')}
+        ${sortableTh('scanner', 'streak', 'Streak')}
+        <th>Why it ranks</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     <p class="lede">Rank is additive and every point is listed, so a high score can
@@ -1387,7 +1798,8 @@ function renderSettings(){
   return `<section class="panel">
     <h2>Settings</h2>
     <p class="lede">Everything here is stored in the database on this machine.
-      Both accounts share it, so a change here changes it for both of you.</p>
+      All four accounts share it, so a change here changes it for everyone —
+      except the AI key below, which is yours alone.</p>
 
     <h3>Telegram alerts</h3>
     <p class="lede">Message @BotFather on Telegram, send <b>/newbot</b>, and paste the
@@ -1432,6 +1844,46 @@ function renderSettings(){
 
     <h3>Alert these watchlists</h3>
     <div class="row">${perList}</div>
+
+    <h3>AI analysis</h3>
+    <p class="lede">Your own key, your own bill. Each account stores its own, so
+      nothing here is shared with the other three. The key is kept in the database
+      on this machine and never sent back to this page in full.</p>
+    <div class="row">
+      <label for="aiProv">Provider</label>
+      <select id="aiProv" class="btn" onchange="saveAi({provider:this.value})">
+        <option value="anthropic" ${(ai && ai.provider) === 'anthropic' ? 'selected' : ''}
+          >Anthropic (Claude)</option>
+        <option value="openai" ${(ai && ai.provider) === 'openai' ? 'selected' : ''}
+          >OpenAI</option>
+      </select>
+      <span class="hint">${ai && ai.configured
+        ? 'Key saved, ending ' + esc(ai.key_hint)
+        : 'No key saved yet.'}</span>
+    </div>
+    <div class="row">
+      <label for="aiKey">API key</label>
+      <input type="password" id="aiKey" placeholder="${ai && ai.configured
+        ? 'Saved — type a new one to replace it' : 'sk-… / sk-ant-…'}">
+      <button class="btn" onclick="saveAiKey()">Save key</button>
+      ${ai && ai.configured
+        ? '<button class="btn ghost" onclick="clearAiKey()">Forget it</button>' : ''}
+    </div>
+    <div class="row">
+      <label for="aiModel">Model</label>
+      <select id="aiModel" class="btn" onchange="saveAi({model:this.value})">
+        ${(aiModels.length ? aiModels : [(ai && ai.model) || '']).filter(Boolean)
+          .map(m => `<option ${(ai && ai.model) === m ? 'selected' : ''}
+            >${esc(m)}</option>`).join('') || '<option value="">— none loaded —</option>'}
+      </select>
+      <button class="btn" onclick="loadAiModels()">Load models</button>
+      <span class="hint">The list comes from the provider itself, so it is
+        always current rather than a list frozen into this app.</span>
+    </div>
+    <p class="hint">Each analysis is one paid API call on your key, and
+      <b>Analyse all</b> is one per stock on the watchlist. The commentary is a
+      language model reading the same numbers you can see — it is not part of the
+      score, it has no news or live prices, and it places no orders.</p>
 
     <h3>Pivot system</h3>
     <p class="lede">Which pivot maths everything runs on — the Signals cards, the
@@ -1578,6 +2030,7 @@ function render(data){
   const el = $('#body');
   if(active && view === 'history'){ el.innerHTML = renderHistory(); return; }
   if(view === 'settings'){ el.innerHTML = renderSettings(); return; }
+  if(view === 'about'){ el.innerHTML = renderAbout(); return; }
   if(view === 'buylist'){ el.innerHTML = renderBuys(); return; }
   if(view === 'scanner'){ el.innerHTML = renderScanner(); return; }
   if(view === 'strategy'){ el.innerHTML = renderStrategy(); return; }
@@ -1626,12 +2079,19 @@ function render(data){
       <button class="btn ghost" onclick="delProfile()">Delete watchlist</button>
       <button class="btn solid" onclick="refresh()" ${busy || !stocks.length ? 'disabled' : ''}>
         ${busy ? 'Reading the tape…' : 'Run signals'}</button>
+      <!-- Only the watchlist offers a whole-list run. The Buy list and the
+           Scanner can hold a hundred names, and that would be a hundred paid
+           API calls from one click. -->
+      <button class="btn" onclick="aiAnalyseAll()"
+        ${aiBusy || !stocks.length ? 'disabled' : ''}
+        title="One API call per stock, billed to your own key"
+        >${aiBusy ? 'Analysing…' : 'Analyse all with AI'}</button>
     </div>
     ${data ? `<p class="foot" style="margin:-8px 0 12px">Last run ${stamp(data.generated_at)}${
       autoOn ? ` · refreshing every ${autoSecs < 60 ? autoSecs + 's' : autoSecs/60 + 'm'}` : ''}</p>` : ''}
 
     ${busy ? '<p class="eyebrow skel">Pulling quotes and recomputing levels…</p>' : ''}
-    ${data ? `<div class="grid">${data.signals.map(card).join('')}</div>` :
+    ${data ? `<div class="grid">${sortedSignals(data.signals).map(card).join('')}</div>` :
       (!busy ? `<div class="empty"><p>${stocks.length ?
         'Watchlist ready. Run signals to score every stock on it.' :
         'Add a few stocks above, then run signals.'}</p></div>` : '')}

@@ -4,10 +4,27 @@ Context for anyone (or any Claude session) picking this project up.
 
 ## What this is
 
-Pivot Desk — an intraday signal dashboard for NSE/BSE stocks, built for personal
-use by two people. Scores each watched stock on Camarilla pivots, moving averages
-and session VWAP, and reports BUY / SELL / HOLD with the reasoning shown.
-Messages both phones over Telegram when a signal changes.
+Pivot Desk — an intraday signal desk for NSE/BSE stocks, built for personal use
+by a handful of people sharing one dataset (four seeded accounts).
+
+Everything derives from pivots computed on the previous completed session's
+H/L/C. Three mechanisms sit on top of that, sharing `analyse()` and the pivot
+maths but otherwise independent — don't collapse them into each other:
+
+1. **The score** (`score_signal`) — trend, session VWAP and pivot position,
+   additive from −3 to +3, reported with its reasons. Drives the Signals cards,
+   the Telegram alerts and the history/hit-rate view.
+2. **The Scanner** (`scan_contraction`) — the owner's Chartink filter, finding
+   stocks whose pivot band has closed inside the previous bar's, ranked by how
+   tightly they coiled. Directionless by design.
+3. **The Buy list** (`scan_breakouts`) — F&O names above the breakout level,
+   with room-to-next-level and growth from first flagging.
+
+There is also a separate breakout strategy (`run_strategy_sweep`) journalling
+what its rules said, and a hand-drawn SVG chart. Six pivot systems are
+selectable and all of the above follow the selection.
+
+It alerts over Telegram when a signal changes. It never places orders.
 
 Repo: https://github.com/neurolooom-eng/stockanalysis
 
@@ -23,7 +40,7 @@ Repo: https://github.com/neurolooom-eng/stockanalysis
 
 ## Architecture
 
-Four files, deliberately. One folder, no subdirectories, no build step.
+Five files, deliberately. One folder, no subdirectories, no build step.
 
 ```
 app.py            FastAPI: API + indicators + alert loop + login + serves the page
@@ -95,7 +112,7 @@ the README for the recovery command if a pull ever removes it.
   bars and 6mo is only ~125 trading days. The intraday windows must stay well
   inside Yahoo's 60-day cap on 5m/15m history.
 - **The chart is hand-drawn SVG, no charting library.** Same reason as no React:
-  four files, no build step. It also means no drawing tools or pan/zoom, which
+  five files, no build step. It also means no drawing tools or pan/zoom, which
   is an accepted trade, not an oversight. Levels are drawn from the previous
   session regardless of the bar interval, so lines don't move between
   timeframes. Labels are suppressed (not the lines) where they would collide,
@@ -124,6 +141,50 @@ the README for the recovery command if a pull ever removes it.
   themselves. This is deliberately *not* the same as sorting by `above_pct`:
   the R3→R4 gap scales with the previous day's range, so the two orderings
   genuinely disagree across stocks. Don't "simplify" one into the other.
+- **The AI commentary is not the score, and the UI must keep saying so.** The
+  owner asked for an explicit BUY/WATCH/AVOID call after being told it sits
+  awkwardly beside a score the app insists is arithmetic rather than advice.
+  That was their call to make, so it ships — but the verdict is rendered
+  separately from the score, both are shown together, and the panel states
+  plainly that a model wrote it, that it has no news or live prices, and that
+  the two will sometimes disagree. Don't quietly merge the two numbers.
+- **AI keys are per account**, on the `users` row, never in `settings`. Each of
+  the four pays for their own usage. `ai_public()` returns only the last four
+  characters; the key itself must never reach the page.
+- **No model list is hardcoded.** Both providers ship models faster than this
+  file gets updated — the dropdown is filled from the provider's own `/models`
+  endpoint with the user's key. Resist the urge to "helpfully" add a fallback
+  list of names; it will be wrong within months.
+- **Both SDKs are imported inside the call**, not at module scope. Someone who
+  never configures a key must not have to install either, and the app has to
+  keep starting if both are absent.
+- **OpenAI takes `max_completion_tokens`, not `max_tokens`** — the older name
+  is rejected by their reasoning models. Anthropic takes `max_tokens`.
+- **"Analyse all" is watchlist-only, on purpose.** The Buy list and Scanner can
+  hold a hundred names, and one click should not be able to fire a hundred paid
+  calls. It also runs sequentially: providers rate-limit hard on burst, and one
+  failure is reported against its own symbol rather than losing the run.
+- **Sorting is one mechanism for every table** (`sortRows` / `sortableTh`),
+  with per-table defaults matching the ordering each list was designed around,
+  so an untouched table looks unchanged. Nulls always sink regardless of
+  direction.
+- **Percent and rupees are two views of the same two numbers**, toggled in the
+  Buy list and remembered per browser. Percent is what return depends on and
+  the only fair comparison across price levels; rupees is what moves in the
+  trade. `amountCell()` takes both and picks — don't compute one from the other
+  at render time, and don't let the toggle apply to only some columns.
+- **The coiled filter combines with the level filter**, so "coiled and still
+  under R4" is reachable. Keep them independent rather than merging into one
+  chip row of mutually exclusive options.
+- **Scanner's Sync refreshes the Buy list too.** They read the same universe
+  and the same levels, so a stale Buy list after a scan meant the two screens
+  could disagree about a stock. It costs a second pass over the universe; if
+  that ever becomes too slow the fix is a combined endpoint sharing one daily
+  fetch, not dropping the refresh.
+- **The watchlist cards sort by room to the top breakout level**, the same
+  ordering the Buy list uses, so one mental model covers both screens.
+  `analyse()` returns `pivot_breakout` for this; without it the client would
+  have to hardcode which level is the breakout per system.
 - **The Buy list groups are a slice of the same data, not a second scan.** Rows
   are tagged with the highest breakout level price has cleared, so "broke R3
   but not R4" is just the rows tagged R3 — filtered client-side, no extra Yahoo
@@ -235,6 +296,25 @@ Not active work. The owner sets the order; don't start any of these unasked.
 6. **Alert thresholds** — signal types or score levels worth messaging about.
 7. **Refresh the F&O list** against NSE's published segment list. It is typed
    into `app.py` and drifts as NSE revises it.
+
+## Documentation split
+
+**About tab** explains the app's principles and limits: what each list is and how
+it works, the score's three tests, the six pivot systems with a live-choice
+indicator and amber warning for non-Camarilla, and four hard limits (never
+places orders, prices are delayed, no predictions, login is not security).
+Users open this tab when they need to understand what they are looking at
+without leaving the browser. It tracks settings live — switch to CPR and the
+About tab immediately shows the warning.
+
+**README in the repo** covers procedures: how to install and run locally, Telegram
+setup, what caps are selectable in Settings, deployment via `render.yaml`,
+database recovery if a git pull removes it, and symbol counts and test details.
+An administrator reads this when setting up the app; a user doesn't need it
+while running.
+
+Don't expand one into the other — they will drift as soon as they are conflated,
+and the user will follow whichever is easier to find (the browser tab).
 
 ## House rules
 

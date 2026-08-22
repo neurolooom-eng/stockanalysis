@@ -237,6 +237,7 @@ def init_db():
                 room_pct    REAL,
                 prev_close  REAL,
                 first_at    TEXT,
+                ref_close   REAL,
                 since_pct   REAL,
                 h3          REAL NOT NULL,
                 h4          REAL NOT NULL,
@@ -263,7 +264,14 @@ def init_db():
                 username    TEXT PRIMARY KEY,
                 salt        TEXT NOT NULL,
                 pw_hash     TEXT NOT NULL,
-                created_at  TEXT NOT NULL
+                created_at  TEXT NOT NULL,
+                -- Each account holds its own AI credentials, so everyone pays
+                -- for their own usage. Stored as given: the key is a secret in
+                -- a file on your machine, exactly like the Telegram token, and
+                -- is never returned to the page in full.
+                ai_provider TEXT,
+                ai_model    TEXT,
+                ai_key      TEXT
             );
             """
         )
@@ -274,11 +282,16 @@ def init_db():
             conn.execute("ALTER TABLE profiles ADD COLUMN alerts INTEGER NOT NULL DEFAULT 1")
         bcols = {r["name"] for r in conn.execute("PRAGMA table_info(breakouts)")}
         if bcols:
-            for col in ("room_pct", "prev_close", "since_pct"):
+            for col in ("room_pct", "prev_close", "since_pct", "ref_close"):
                 if col not in bcols:
                     conn.execute(f"ALTER TABLE breakouts ADD COLUMN {col} REAL")
             if "first_at" not in bcols:
                 conn.execute("ALTER TABLE breakouts ADD COLUMN first_at TEXT")
+        ucols = {r["name"] for r in conn.execute("PRAGMA table_info(users)")}
+        if ucols:
+            for col in ("ai_provider", "ai_model", "ai_key"):
+                if col not in ucols:
+                    conn.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
         wcols = {r["name"] for r in conn.execute("PRAGMA table_info(watchlist)")}
         if wcols:
             if "ref_close" not in wcols:
@@ -902,6 +915,10 @@ def analyse(symbol: str, exchange: str) -> Dict:
             # system produced it.
             "pivot_order": [k for k in PIVOT_SYSTEMS[system]["order"] if k in piv],
             "pivot_band": list(PIVOT_SYSTEMS[system]["band"]),
+            # Which levels count as a breakout on this system, low to high. The
+            # watchlist sorts on the distance to the highest of them, the same
+            # ordering the Buy list uses.
+            "pivot_breakout": list(PIVOT_SYSTEMS[system]["breakout"]),
             "as_of": as_of,
             "basis": basis,
         })
@@ -1479,6 +1496,207 @@ def scan_contraction(timeframe: str = "1d", exchange: str = "NSE") -> Dict:
 
 
 # ----------------------------------------------------------------------------
+# AI COMMENTARY
+#
+# Reads the numbers this app already computed and writes them up, ending with
+# a BUY / WATCH / AVOID call. The owner asked for the verdict explicitly after
+# being told it sits awkwardly beside a score the app insists is not advice -
+# so the UI keeps the two visually separate and labels this as model output.
+#
+# Both SDKs are imported INSIDE the call. Neither is needed to run the app, and
+# someone who never configures a key should not have to install either.
+#
+# No model list is hardcoded. Both providers ship models faster than this file
+# can be updated, so the dropdown is filled from the provider's own /models
+# endpoint using the user's key - always current, never a stale guess.
+# ----------------------------------------------------------------------------
+
+AI_PROVIDERS = ("anthropic", "openai")
+AI_MAX_TOKENS = 1400
+AI_TIMEOUT = 90
+
+
+def ai_config(username: str) -> Dict:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT ai_provider, ai_model, ai_key FROM users WHERE username = ?",
+            (username,)).fetchone()
+    if not row:
+        return {"provider": "anthropic", "model": "", "key": "", "configured": False}
+    key = (row["ai_key"] or "").strip()
+    provider = row["ai_provider"] or "anthropic"
+    return {
+        "provider": provider if provider in AI_PROVIDERS else "anthropic",
+        "model": row["ai_model"] or "",
+        "key": key,
+        "configured": bool(key),
+    }
+
+
+def save_ai_config(username: str, provider: Optional[str], model: Optional[str],
+                   key: Optional[str]) -> None:
+    sets, vals = [], []
+    if provider is not None and provider in AI_PROVIDERS:
+        sets.append("ai_provider = ?")
+        vals.append(provider)
+    if model is not None:
+        sets.append("ai_model = ?")
+        vals.append(model.strip())
+    if key is not None:
+        # An empty string means "clear it"; the UI sends None to leave it be.
+        sets.append("ai_key = ?")
+        vals.append(key.strip())
+    if not sets:
+        return
+    vals.append(username)
+    with db() as conn:
+        conn.execute(f"UPDATE users SET {', '.join(sets)} WHERE username = ?", vals)
+
+
+def ai_list_models(cfg: Dict) -> List[str]:
+    """Ask the provider what it currently serves."""
+    if not cfg["configured"]:
+        raise HTTPException(400, "Add your API key first.")
+    try:
+        if cfg["provider"] == "anthropic":
+            import anthropic
+            client = anthropic.Anthropic(api_key=cfg["key"], timeout=AI_TIMEOUT)
+            return [m.id for m in client.models.list()]
+        import openai
+        client = openai.OpenAI(api_key=cfg["key"], timeout=AI_TIMEOUT)
+        return sorted(m.id for m in client.models.list())
+    except ImportError as exc:
+        raise HTTPException(
+            400, f"The {cfg['provider']} package is not installed. "
+                 f"Run: pip install -r requirements.txt") from exc
+    except Exception as exc:  # noqa: BLE001 - surface the provider's own words
+        raise HTTPException(502, f"{type(exc).__name__}: {exc}") from exc
+
+
+def ai_complete(cfg: Dict, system: str, prompt: str) -> str:
+    """One completion, from whichever provider this user configured."""
+    if not cfg["configured"]:
+        raise HTTPException(400, "Add your API key in Settings first.")
+    if not cfg["model"]:
+        raise HTTPException(400, "Pick a model in Settings first.")
+    try:
+        if cfg["provider"] == "anthropic":
+            import anthropic
+            client = anthropic.Anthropic(api_key=cfg["key"], timeout=AI_TIMEOUT)
+            msg = client.messages.create(
+                model=cfg["model"],
+                max_tokens=AI_MAX_TOKENS,
+                system=system,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return "".join(b.text for b in msg.content if b.type == "text").strip()
+
+        import openai
+        client = openai.OpenAI(api_key=cfg["key"], timeout=AI_TIMEOUT)
+        # max_completion_tokens, not max_tokens: the older name is rejected by
+        # OpenAI's reasoning models, and this one works across all of them.
+        out = client.chat.completions.create(
+            model=cfg["model"],
+            max_completion_tokens=AI_MAX_TOKENS,
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": prompt}],
+        )
+        return (out.choices[0].message.content or "").strip()
+    except ImportError as exc:
+        raise HTTPException(
+            400, f"The {cfg['provider']} package is not installed. "
+                 f"Run: pip install -r requirements.txt") from exc
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - the provider's message is the useful part
+        raise HTTPException(502, f"{type(exc).__name__}: {exc}") from exc
+
+
+AI_SYSTEM = """You are reading levels off an intraday pivot desk for Indian \
+equities (NSE/BSE) and writing a short, concrete read-out for the trader who \
+built it.
+
+What you are given is arithmetic on PAST prices from Yahoo Finance, which is \
+DELAYED and unofficial. You have no news, no fundamentals, no order book and \
+no live quote. Say so plainly if the question turns on something you cannot \
+see, and never invent a catalyst, an earnings date or a piece of news.
+
+Write for someone who already knows what pivots are. Be specific about the \
+numbers in front of you - name the levels and distances rather than talking in \
+generalities. Keep it under 180 words.
+
+Structure your answer exactly as:
+
+READ: two or three sentences on where price sits against its levels and what \
+the trend, volume and any contraction suggest.
+WATCH: the one or two specific price levels that would confirm the setup, and \
+the level that would invalidate it.
+CALL: exactly one of BUY, WATCH or AVOID, then a single clause saying why.
+
+BUY means the setup is live now on these numbers. WATCH means it needs \
+something to happen first - say what. AVOID means the numbers argue against \
+it. Base the call only on what you were given; if the data is too thin to \
+judge, say AVOID and name what is missing."""
+
+
+def ai_stock_prompt(quote: Dict, extra: Optional[Dict] = None) -> str:
+    """Everything the desk knows about one stock, as plain lines."""
+    piv = quote.get("pivots") or {}
+    lines = [
+        f"Symbol: {quote.get('symbol')} ({quote.get('exchange')})",
+        f"Pivot system: {quote.get('pivot_label') or quote.get('pivot_system')}",
+        f"Last price: {quote.get('price')}",
+        f"Previous close: {quote.get('prev_close')}  "
+        f"(today {quote.get('change_pct')}%)",
+        # Round here rather than trusting the caller: a raw pivot is a long
+        # float, which is both noisy to read and needless tokens to pay for.
+        "Levels from the previous completed session: "
+        + ", ".join(f"{pretty_level(k)} {v:.2f}" for k, v in piv.items()),
+        f"Band width: {quote.get('band_pct')}% of price",
+        f"Session VWAP: {quote.get('vwap')}",
+        f"MA{quote.get('ma_fast_period')}: {quote.get('ma_fast')}  "
+        f"MA{quote.get('ma_slow_period')}: {quote.get('ma_slow')}",
+        f"Desk score: {quote.get('signal')} {quote.get('score')} out of 3",
+    ]
+    for r in quote.get("reasons") or []:
+        lines.append(f"  - {r.get('text')} ({r.get('weight'):+g})")
+    lines.append(f"Data basis: {quote.get('basis')}, as of {quote.get('as_of')}")
+
+    if extra:
+        lines.append("")
+        for label, value in extra.items():
+            if value not in (None, "", []):
+                lines.append(f"{label}: {value}")
+    return "\n".join(lines)
+
+
+def ai_analyse_stock(username: str, symbol: str, exchange: str,
+                     extra: Optional[Dict] = None) -> Dict:
+    cfg = ai_config(username)
+    quote = analyse(symbol, exchange)
+    if "error" in quote:
+        raise HTTPException(502, f"Could not price {symbol}: {quote['error']}")
+    text = ai_complete(cfg, AI_SYSTEM, ai_stock_prompt(quote, extra))
+    verdict = ""
+    for line in text.splitlines():
+        if line.strip().upper().startswith("CALL"):
+            upper = line.upper()
+            for word in ("BUY", "WATCH", "AVOID"):
+                if word in upper:
+                    verdict = word
+                    break
+            break
+    return {
+        "symbol": symbol, "exchange": exchange,
+        "text": text, "verdict": verdict,
+        "price": quote.get("price"),
+        "score": quote.get("score"), "signal": quote.get("signal"),
+        "provider": cfg["provider"], "model": cfg["model"],
+        "generated_at": datetime.now(IST).isoformat(),
+    }
+
+
+# ----------------------------------------------------------------------------
 # BUY LIST - F&O stocks trading above R3 / R4
 #
 # "R3" and "R4" are the Camarilla H3 and H4. Price above H3 is the standard
@@ -1625,11 +1843,13 @@ def scan_breakouts(exchange: str = "NSE") -> Dict:
             conn.execute(
                 "INSERT OR REPLACE INTO breakouts (symbol, exchange, scanned_at,"
                 " price, level_name, level_price, above_pct, room_pct,"
-                " prev_close, first_at, since_pct, h3, h4, pp, coiled,"
-                " turnover_cr) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " prev_close, first_at, ref_close, since_pct, h3, h4, pp,"
+                " coiled, turnover_cr)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (h["symbol"], h["exchange"], scanned_at, h["price"],
                  h["level_name"], h["level_price"], h["above_pct"],
-                 h["room_pct"], h["prev_close"], h["first_at"], h["since_pct"],
+                 h["room_pct"], h["prev_close"], h["first_at"],
+                 h["ref_close"], h["since_pct"],
                  h["h3"], h["h4"], h["pp"], int(h["coiled"]),
                  h["turnover_cr"]))
 
@@ -2379,6 +2599,132 @@ def chart(symbol: str, exchange: str = "NSE", interval: str = "5m",
         "pivot_label": PIVOT_SYSTEMS[system]["label"],
         "level_names": {k: pretty_level(k) for k in piv},
     }
+
+
+class AiIn(BaseModel):
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    key: Optional[str] = None
+
+
+class AnalyseIn(BaseModel):
+    symbol: str
+    exchange: str = "NSE"
+    source: Optional[str] = None      # buylist | scanner | watchlist
+
+
+def current_user(request: Request) -> str:
+    user = read_token(request.cookies.get(SESSION_COOKIE))
+    if not user:
+        raise HTTPException(401, "Not signed in")
+    return user
+
+
+def ai_public(cfg: Dict) -> Dict:
+    """Never send the key back - only enough to recognise which one is saved."""
+    key = cfg["key"]
+    return {"provider": cfg["provider"], "model": cfg["model"],
+            "configured": cfg["configured"],
+            "key_hint": f"…{key[-4:]}" if len(key) >= 4 else "",
+            "providers": list(AI_PROVIDERS)}
+
+
+@app.get("/api/ai")
+def ai_read(request: Request):
+    return ai_public(ai_config(current_user(request)))
+
+
+@app.post("/api/ai")
+def ai_write(body: AiIn, request: Request):
+    user = current_user(request)
+    if body.provider is not None and body.provider not in AI_PROVIDERS:
+        raise HTTPException(400, f"Provider must be one of {list(AI_PROVIDERS)}")
+    save_ai_config(user, body.provider, body.model, body.key)
+    return ai_public(ai_config(user))
+
+
+@app.get("/api/ai/models")
+def ai_models(request: Request):
+    cfg = ai_config(current_user(request))
+    return {"provider": cfg["provider"], "models": ai_list_models(cfg)}
+
+
+@app.post("/api/ai/analyse")
+def ai_analyse_one(body: AnalyseIn, request: Request):
+    """Commentary on one stock, from wherever it was clicked."""
+    user = current_user(request)
+    symbol = body.symbol.strip().upper()
+    exchange = body.exchange.strip().upper()
+    extra: Dict = {}
+
+    # Pull in whatever the originating list knows that analyse() does not.
+    if body.source == "buylist":
+        with db() as conn:
+            row = conn.execute(
+                "SELECT * FROM breakouts WHERE symbol=? AND exchange=?"
+                " ORDER BY scanned_at DESC LIMIT 1", (symbol, exchange)).fetchone()
+        if row:
+            r = dict(row)
+            extra = {
+                "On the Buy list": f"above {r['level_name']} at {r['level_price']}"
+                                   f" by {r['above_pct']}%",
+                "Room to the next level": f"{r['room_pct']}%",
+                "Also contracting": "yes" if r["coiled"] else "no",
+                "Growth since first flagged": f"{r['since_pct']}%",
+                "Average turnover": f"{r['turnover_cr']} crore/day",
+            }
+    elif body.source == "scanner":
+        with db() as conn:
+            row = conn.execute(
+                "SELECT * FROM scan_hits WHERE symbol=? AND exchange=?"
+                " ORDER BY scanned_at DESC LIMIT 1", (symbol, exchange)).fetchone()
+        if row:
+            r = dict(row)
+            try:
+                rules = "; ".join(x["text"] for x in json.loads(r["rules"]))
+            except (TypeError, ValueError):
+                rules = ""
+            extra = {
+                "Contraction found on": f"{r['timeframe']} bars",
+                "Band now": f"{r['l3']} to {r['h3']}, "
+                            f"was {r['prev_l3']} to {r['prev_h3']}",
+                "Tighter by": f"{r['depth_pct']}%",
+                "Contracting for": f"{r['streak']} bars in a row",
+                "Coil rank": f"{r['rank_score']} ({rules})",
+            }
+    return ai_analyse_stock(user, symbol, exchange, extra or None)
+
+
+@app.post("/api/ai/analyse-all/{profile_id}")
+def ai_analyse_watchlist(profile_id: int, request: Request):
+    """
+    Every stock on one watchlist. Deliberately only offered here - the Buy list
+    and Scanner can run to a hundred names and that is a hundred paid calls.
+
+    Runs sequentially rather than in parallel: providers rate-limit hard on
+    burst, and a watchlist is capped at a few dozen names anyway. One failure
+    is reported against its own symbol instead of losing the whole run.
+    """
+    user = current_user(request)
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM profiles WHERE id = ?",
+                            (profile_id,)).fetchone():
+            raise HTTPException(404, "Watchlist not found")
+        rows = conn.execute(
+            "SELECT symbol, exchange FROM watchlist WHERE profile_id = ?"
+            " ORDER BY symbol", (profile_id,)).fetchall()
+    if not rows:
+        raise HTTPException(400, "Nothing on this watchlist yet.")
+
+    results, failed = [], []
+    for r in rows:
+        try:
+            results.append(ai_analyse_stock(user, r["symbol"], r["exchange"]))
+        except HTTPException as exc:
+            failed.append({"symbol": r["symbol"], "error": str(exc.detail)})
+        except Exception as exc:  # noqa: BLE001 - one bad name must not stop the run
+            failed.append({"symbol": r["symbol"], "error": f"{type(exc).__name__}: {exc}"})
+    return {"analysed": results, "failed": failed, "count": len(rows)}
 
 
 @app.post("/api/buylist/run")
